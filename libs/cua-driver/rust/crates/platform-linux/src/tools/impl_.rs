@@ -443,11 +443,12 @@ pub(crate) fn screenshot_scale(
         .snapshots
         .screenshot_scale(pid as i32, window_id, args)
         .map_err(|missing| {
-            // A tiled niri window never has a screenshot: say why instead of
-            // asking for the get_window_state read that cannot give one.
+            // A niri window niri cannot place never has a screenshot: say why
+            // instead of asking for the get_window_state read that cannot
+            // give one.
             window_id
                 .filter(|_| crate::wayland::is_wayland() && crate::wayland::niri::is_session())
-                .and_then(crate::wayland::niri::tiled_refusal)
+                .and_then(crate::wayland::niri::unplaced_refusal)
                 .map_or(missing, input_error_result)
         })
 }

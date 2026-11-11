@@ -33,11 +33,14 @@ impl Rect {
             && i64::from(y) < self.bottom()
     }
 
-    pub(super) fn inside(&self, outer: &Rect) -> bool {
-        self.x >= outer.x
-            && self.y >= outer.y
-            && self.right() <= outer.right()
-            && self.bottom() <= outer.bottom()
+    /// Whether this rectangle is inside `outer`, allowing `slack` logical
+    /// pixels at each edge. A window that fills its output can round one
+    /// pixel past the output's truncated IPC size at a fractional scale.
+    pub(super) fn inside_with_slack(&self, outer: &Rect, slack: i64) -> bool {
+        i64::from(self.x) >= i64::from(outer.x) - slack
+            && i64::from(self.y) >= i64::from(outer.y) - slack
+            && self.right() <= outer.right() + slack
+            && self.bottom() <= outer.bottom() + slack
     }
 
     pub(super) fn from_f64(x: f64, y: f64, width: f64, height: f64) -> Option<Self> {
@@ -54,15 +57,17 @@ impl Rect {
     }
 }
 
-/// What a tiled window's window capture and window-coordinate pointer input
-/// refuse with: no pixel can be proven to be the window's.
-const TILED_REFUSAL: &str = "niri does not report where a tiled window is; use get_desktop_state and a desktop-scope action (needs the display grant), or float the window";
+/// What an off-view tiled window's window capture and window-coordinate
+/// pointer input refuse with: no pixel can be proven to be the window's.
+const NO_VIEW_POSITION: &str = "niri reports no workspace-view position for this tiled window, so it is outside the current view (or this niri release does not report tiled positions); use get_desktop_state and a desktop-scope action, or bring the window into view";
 
 /// Why niri reports no on-screen place for a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unplaced {
-    /// In the scrolling layout: niri does not report where the view is.
-    Tiled,
+    /// A tiled window with no `tile_pos_in_workspace_view`: it is outside
+    /// the current workspace view, or this niri release does not report the
+    /// position.
+    NoViewPosition,
     /// On an inactive workspace, on no output, or the overview is open.
     NotShowing,
     /// A tiled window as large as the output, likely fullscreen, hides the
@@ -75,7 +80,7 @@ pub enum Unplaced {
 impl Unplaced {
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Tiled => TILED_REFUSAL,
+            Self::NoViewPosition => NO_VIEW_POSITION,
             Self::NotShowing => {
                 "the window is not showing: its workspace is not active on an output, or the niri overview is open"
             }
@@ -87,7 +92,9 @@ impl Unplaced {
     }
 }
 
-/// A floating window's place on screen, from one compositor snapshot.
+/// A window's place on screen, from one compositor snapshot. Both floating
+/// and tiled windows in the current workspace view get one; an off-view
+/// tiled window has no `tile_pos_in_workspace_view` and no place.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     /// The window's geometry in the global logical layout, rounded to whole
@@ -173,12 +180,12 @@ pub struct Window {
     /// focused window highest. niri reports no stacking order; this is the
     /// best available "which of a process's windows is in use".
     pub focus_rank: usize,
-    /// niri shows it: a placed floating window, or the active tiled window of
-    /// an active workspace while the overview is closed.
+    /// niri shows it: its workspace is active on an output, the overview is
+    /// closed, and it has a place in the current workspace view.
     pub on_screen: bool,
     /// The window's logical size, which niri reports for tiled windows too.
-    /// Identity only: a tiled window has no position, so this is never input
-    /// or capture geometry.
+    /// Used for AT-SPI root correlation; input and capture geometry come from
+    /// the placement's exact rectangle.
     pub size: Option<(u32, u32)>,
     pub placement: Result<Placed, Unplaced>,
 }
@@ -203,9 +210,6 @@ impl Scene {
 
     fn placement(&self, window: &IpcWindow) -> Result<Placed, Unplaced> {
         let layout = window.layout.as_ref().ok_or(Unplaced::NoLayout)?;
-        if layout.pos_in_scrolling_layout.is_some() {
-            return Err(Unplaced::Tiled);
-        }
         if self.overview_open {
             return Err(Unplaced::NotShowing);
         }
@@ -214,12 +218,12 @@ impl Scene {
             .filter(|workspace| workspace.is_active)
             .ok_or(Unplaced::NotShowing)?;
         let logical = self.logical(workspace).ok_or(Unplaced::NotShowing)?;
-        if self.covered(workspace, logical) {
+        if self.covered(workspace, logical, window.id) {
             return Err(Unplaced::Covered);
         }
         let (tile_x, tile_y) = layout
             .tile_pos_in_workspace_view
-            .ok_or(Unplaced::NotShowing)?;
+            .ok_or(Unplaced::NoViewPosition)?;
         let (offset_x, offset_y) = layout.window_offset_in_tile;
         let (width, height) = layout.window_size;
         let origin = (
@@ -248,14 +252,17 @@ impl Scene {
         })
     }
 
-    /// niri hides a workspace's floating windows while its active column is
+    /// niri hides a workspace's other windows while its active column is
     /// fullscreen. IPC has no fullscreen flag, so an active tiled tile as
     /// large as the output (give or take a pixel) counts as covering them.
-    /// This is refusal evidence only, never proof that a window is visible.
-    fn covered(&self, workspace: &IpcWorkspace, logical: &IpcLogical) -> bool {
+    /// The covering window itself is not covered. This is refusal evidence
+    /// only, never proof that a window is visible.
+    fn covered(&self, workspace: &IpcWorkspace, logical: &IpcLogical, window_id: u64) -> bool {
         self.windows
             .iter()
-            .filter(|window| Some(window.id) == workspace.active_window_id)
+            .filter(|window| {
+                Some(window.id) == workspace.active_window_id && window.id != window_id
+            })
             .filter_map(|window| window.layout.as_ref())
             .any(|layout| {
                 layout.pos_in_scrolling_layout.is_some()
@@ -264,17 +271,8 @@ impl Scene {
             })
     }
 
-    fn on_screen(&self, window: &IpcWindow, placement: &Result<Placed, Unplaced>) -> bool {
-        match placement {
-            Ok(_) => true,
-            Err(Unplaced::Tiled) => {
-                !self.overview_open
-                    && self.workspace(window).is_some_and(|workspace| {
-                        workspace.is_active && workspace.active_window_id == Some(window.id)
-                    })
-            }
-            Err(_) => false,
-        }
+    fn on_screen(&self, placement: &Result<Placed, Unplaced>) -> bool {
+        placement.is_ok()
     }
 
     pub(super) fn windows(&self) -> Result<Vec<Window>> {
@@ -303,7 +301,7 @@ impl Scene {
                             < (window.is_focused, window.focus_timestamp)
                     })
                     .count(),
-                on_screen: self.on_screen(window, &placement),
+                on_screen: self.on_screen(&placement),
                 size: window.layout.as_ref().and_then(|layout| {
                     let (width, height) = layout.window_size;
                     Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
@@ -335,17 +333,18 @@ impl Scene {
         pointer_space_of(&self.outputs)
     }
 
-    /// The one laid-out output. Display capture copies a single output, so
-    /// output-pixel routes need a layout where that output is the only one.
-    pub(super) fn single_output(&self) -> Result<(&IpcOutput, &IpcLogical)> {
-        match self.laid_out().as_slice() {
-            [(output, logical)] => Ok((*output, logical.checked()?)),
-            [] => bail!("niri has no enabled output"),
-            outputs => bail!(
-                "niri window capture and desktop input support a single output; this layout has {}",
-                outputs.len()
-            ),
-        }
+    /// One laid-out output by niri's name. A window's output is named by its
+    /// workspace; capture reads the same output's logical rectangle and
+    /// current mode, so a window on any output is addressable.
+    pub(super) fn output(&self, name: &str) -> Result<(&IpcOutput, &IpcLogical)> {
+        let output = self
+            .outputs
+            .get(name)
+            .with_context(|| format!("niri reports no output named {name:?}"))?;
+        let logical = output.logical.as_ref().with_context(|| {
+            format!("niri output {name:?} has no logical layout (it is disabled)")
+        })?;
+        Ok((output, logical.checked()?))
     }
 }
 
@@ -445,28 +444,54 @@ mod tests {
     }
 
     #[test]
-    fn tiled_windows_get_no_geometry() {
+    fn off_view_tiled_windows_get_no_geometry() {
+        // `tiled()` has no tile_pos_in_workspace_view: niri reports none for
+        // tiles outside the current view.
         let scene = one_output(vec![tiled(5, 1, (402.0, 448.0))]);
-        assert_eq!(placement(&scene, 5), Err(Unplaced::Tiled));
+        assert_eq!(placement(&scene, 5), Err(Unplaced::NoViewPosition));
         assert!(
             !scene.window(5).unwrap().on_screen,
-            "an inactive tiled window is not proven on screen"
+            "a tiled window with no view position is not proven on screen"
         );
     }
 
     #[test]
-    fn active_tiled_window_is_on_screen_without_a_place() {
+    fn a_tiled_window_in_view_gets_workspace_view_geometry() {
         let scene = scene(
-            vec![tiled(5, 1, (402.0, 448.0))],
+            vec![tiled_at(5, 1, (120.0, 40.0), (402.0, 448.0))],
             vec![workspace(1, "winit", true, Some(5))],
             vec![output("winit", 0, 0, (1280, 720), 1.5, "Normal")],
             false,
         );
         let window = scene.window(5).unwrap();
         assert!(window.on_screen);
-        assert_eq!(window.placement, Err(Unplaced::Tiled));
-        // The size still identifies it, for AT-SPI root correlation.
-        assert_eq!(window.size, Some((402, 448)));
+        let placed = window.placement.unwrap();
+        assert_eq!(
+            placed.rect,
+            Rect {
+                x: 120,
+                y: 40,
+                width: 402,
+                height: 448
+            }
+        );
+        assert_eq!(placed.output, "winit");
+    }
+
+    #[test]
+    fn a_fullscreen_like_tile_places_itself_but_covers_the_others() {
+        let scene = scene(
+            vec![
+                tiled_at(5, 1, (0.0, 0.0), (853.0, 480.0)),
+                floating(7, 1, (100.0, 60.0), (300, 200)),
+            ],
+            vec![workspace(1, "winit", true, Some(5))],
+            vec![output("winit", 0, 0, (1280, 720), 1.5, "Normal")],
+            false,
+        );
+        // The covering tile itself is placed, not hidden behind itself.
+        assert!(scene.window(5).unwrap().placement.is_ok());
+        assert_eq!(placement(&scene, 7), Err(Unplaced::Covered));
     }
 
     #[test]

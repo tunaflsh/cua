@@ -29,39 +29,25 @@ fn placed_or_refuse(window: &Window) -> Result<&Placed> {
     })
 }
 
-/// The refusal for window-coordinate input on `window_id` when niri shows it
-/// tiled, so a caller without a screenshot of it learns why it has none.
-pub fn tiled_refusal(window_id: u64) -> Option<anyhow::Error> {
+/// The refusal for a window niri cannot place, so a caller without a
+/// screenshot of it learns why it has none.
+pub fn unplaced_refusal(window_id: u64) -> Option<anyhow::Error> {
     let scene = ipc().scene().ok()?;
     let window = scene.window(window_id).ok()?;
     match &window.placement {
-        Err(Unplaced::Tiled) => placed_or_refuse(&window).err(),
-        _ => None,
+        Err(_) => placed_or_refuse(&window).err(),
+        Ok(_) => None,
     }
 }
 
-/// Translate window coordinates into the global layout. A floating window's
-/// coordinates are window-local; the rectangle used travels with the point so
-/// the pointer gate can prove it still holds. A window without a place (a
-/// tiled one) refuses instead of passing `(x, y)` through as output
-/// coordinates.
+/// Translate window coordinates into the global layout. Window coordinates
+/// are window-local; the rectangle used travels with the point so the pointer
+/// gate can prove it still holds. A window without a place (an off-view tiled
+/// window) refuses instead of passing `(x, y)` through as output coordinates.
 pub fn aim(window_id: u64, x: i32, y: i32) -> Result<AimedPoint> {
     let scene = ipc().scene().map_err(input_unavailable)?;
-    single_output_pointer(&scene)?;
     let window = scene.window(window_id).map_err(input_unavailable)?;
     aim_at(&window, x, y)
-}
-
-/// Window-addressed pointer input needs a single output: with several, the
-/// virtual pointer's absolute motion spans their bounding box, and nothing
-/// has shown that niri maps it the way the driver computes it.
-pub(super) fn single_output_pointer(scene: &Scene) -> Result<()> {
-    match scene.laid_out().len() {
-        0 | 1 => Ok(()),
-        outputs => Err(foreground_unavailable(format!(
-            "niri window-coordinate pointer input supports a single output; this layout has {outputs}"
-        ))),
-    }
 }
 
 pub(super) fn aim_at(window: &Window, x: i32, y: i32) -> Result<AimedPoint> {
@@ -117,7 +103,7 @@ impl<C: FnMut(Instant) -> Result<UnixStream>> PointerGate<C> {
 pub enum Target {
     /// A window by id, focused once the action is admitted.
     Window(u64),
-    /// Pixels of the single output, as `get_desktop_state` shows it.
+    /// Pixels of the desktop frame, as `get_desktop_state` shows it.
     Desktop,
     /// Nothing to check beyond the session and the pointer space.
     Unaddressed,
@@ -179,14 +165,13 @@ fn settled_window(scene: impl FnMut(Instant) -> Result<Scene>, id: u64) -> Resul
     )
 }
 
-/// Admit window-addressed pointer input on a floating window: the target
-/// must still have the rectangle each point was translated against, and
-/// every point must land on it rather than on another floating window. A
-/// point given in layout coordinates carries no rectangle to compare. A
-/// window without a place (a tiled one) refuses. Returns the rectangle
+/// Admit window-addressed pointer input on a placed window: the target must
+/// still have the rectangle each point was translated against, and every
+/// point must land on it rather than on another floating window. A point
+/// given in layout coordinates carries no rectangle to compare. A window
+/// without a place (an off-view tiled window) refuses. Returns the rectangle
 /// admitted.
 fn gate_pointer(scene: &Scene, window_id: u64, points: &[AimedPoint]) -> Result<Rect> {
-    single_output_pointer(scene)?;
     let window = scene.window(window_id).map_err(input_unavailable)?;
     pointer_admission(&window, points)?;
     Ok(placed_or_refuse(&window)?.rect)
@@ -244,27 +229,38 @@ fn pointer_admission(window: &Window, points: &[AimedPoint]) -> Result<()> {
     Ok(())
 }
 
-/// Admit desktop-scope points: pixels of the single output, the frame a
-/// `get_desktop_state` screenshot shows.
+/// Admit desktop-scope points: layout points that must lie on one of the
+/// outputs the `get_desktop_state` frame spans. A point in a gap between
+/// monitors, or past an output edge, refuses instead of letting niri clamp
+/// the virtual pointer to some other output's edge.
 pub(super) fn desktop_admission(scene: &Scene, points: &[AimedPoint]) -> Result<()> {
-    let (output, logical) = scene.single_output().map_err(input_unavailable)?;
-    let area = Rect {
-        x: logical.x,
-        y: logical.y,
-        width: logical.width,
-        height: logical.height,
-    };
-    match points
-        .iter()
-        .map(|aimed| aimed.point)
-        .find(|&(x, y)| !area.contains(x, y))
-    {
-        Some((x, y)) => Err(foreground_unavailable(format!(
-            "point ({x}, {y}) is past the edge of niri output {}, which the get_desktop_state screenshot shows",
-            output.name
-        ))),
-        None => Ok(()),
+    let outputs = scene.laid_out();
+    for (x, y) in points.iter().map(|aimed| aimed.point) {
+        let on_output = outputs.iter().any(|(_, logical)| {
+            Rect {
+                x: logical.x,
+                y: logical.y,
+                width: logical.width,
+                height: logical.height,
+            }
+            .contains(x, y)
+        });
+        if !on_output {
+            let detail = match outputs.as_slice() {
+                [(output, _)] => format!(
+                    "point ({x}, {y}) is past the edge of niri output {}, which the get_desktop_state screenshot shows",
+                    output.name
+                ),
+                [] => "point ({x}, {y}) is outside the desktop frame: niri has no enabled output"
+                    .to_owned(),
+                _ => format!(
+                    "point ({x}, {y}) is not on any enabled niri output in the current desktop frame; call get_desktop_state again"
+                ),
+            };
+            return Err(foreground_unavailable(detail));
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -361,9 +357,11 @@ mod tests {
     // ── Pointer admission ───────────────────────────────────────────────────
 
     #[test]
-    fn window_coordinate_pointer_input_refuses_several_outputs() {
-        let two_outputs = scene(
-            vec![floating(7, 1, (100.0, 60.0), (300, 200))],
+    fn window_coordinate_pointer_input_works_on_a_second_output() {
+        // Window 7 is on DP-2, whose logical origin is x=1920. Its window
+        // coordinates must translate to that output's layout position.
+        let scene = scene(
+            vec![floating(7, 2, (100.0, 60.0), (300, 200))],
             vec![
                 workspace(1, "DP-1", true, None),
                 workspace(2, "DP-2", true, None),
@@ -374,12 +372,38 @@ mod tests {
             ],
             false,
         );
+        let aimed = aim_at(&scene.window(7).unwrap(), 10, 20).unwrap();
+        assert_eq!(aimed.point, (2030, 80));
         assert_eq!(
-            single_output_pointer(&two_outputs).unwrap_err().to_string(),
-            "foreground_unavailable: niri window-coordinate pointer input supports a single output; this layout has 2"
+            gate_pointer(&scene, 7, &[(2030, 80).into()]).unwrap(),
+            Rect {
+                x: 2020,
+                y: 60,
+                width: 300,
+                height: 200
+            }
         );
-        let one = one_output(vec![floating(7, 1, (100.0, 60.0), (300, 200))]);
-        assert!(single_output_pointer(&one).is_ok());
+    }
+
+    #[test]
+    fn tiled_window_coordinates_add_the_tile_and_window_offset() {
+        let scene = scene(
+            vec![tiled_at(5, 1, (120.0, 40.0), (300.0, 200.0))],
+            vec![workspace(1, "winit", true, Some(5))],
+            vec![output("winit", 0, 0, (1280, 720), 1.5, "Normal")],
+            false,
+        );
+        let aimed = aim_at(&scene.window(5).unwrap(), 10, 20).unwrap();
+        assert_eq!(aimed.point, (130, 60));
+        assert_eq!(
+            gate_pointer(&scene, 5, &[(130, 60).into()]).unwrap(),
+            Rect {
+                x: 120,
+                y: 40,
+                width: 300,
+                height: 200
+            }
+        );
     }
 
     #[test]
@@ -441,35 +465,53 @@ mod tests {
             pointer_admission(&tiled, &[aimed_on((150, 100), rect)])
                 .unwrap_err()
                 .to_string(),
-            "foreground_unavailable: niri window 5: niri does not report where a tiled window is; use get_desktop_state and a desktop-scope action (needs the display grant), or float the window"
+            "foreground_unavailable: niri window 5: niri reports no workspace-view position for this tiled window, so it is outside the current view (or this niri release does not report tiled positions); use get_desktop_state and a desktop-scope action, or bring the window into view"
         );
     }
 
     #[test]
-    fn a_tiled_window_refuses_window_capture_and_window_coordinates() {
-        // Even the focused active tiled window: its neighbour shares the
-        // output, and niri cannot say which pixels are whose.
+    fn an_off_view_tiled_window_refuses_window_capture_and_window_coordinates() {
+        // Its workspace-view position is absent, so no pixel can be proven
+        // to be this window's.
         let scene = tiled_scene(Some(5));
         assert_eq!(
             capture_plan_in(&scene, 5, Some(105)),
-            Err("niri does not report where a tiled window is; use get_desktop_state and a desktop-scope action (needs the display grant), or float the window")
+            Err("niri reports no workspace-view position for this tiled window, so it is outside the current view (or this niri release does not report tiled positions); use get_desktop_state and a desktop-scope action, or bring the window into view")
         );
         let window = scene.window(5).unwrap();
         assert_eq!(
             aim_at(&window, 10, 20).unwrap_err().to_string(),
-            "foreground_unavailable: niri window 5: niri does not report where a tiled window is; use get_desktop_state and a desktop-scope action (needs the display grant), or float the window"
+            "foreground_unavailable: niri window 5: niri reports no workspace-view position for this tiled window, so it is outside the current view (or this niri release does not report tiled positions); use get_desktop_state and a desktop-scope action, or bring the window into view"
         );
     }
 
     #[test]
-    fn desktop_pixels_are_admitted_only_on_the_single_output() {
-        let scene = tiled_scene(Some(5));
-        desktop_admission(&scene, &[(2500, 400).into(), (2100, 100).into()]).unwrap();
+    fn desktop_pixels_are_admitted_on_every_output_and_refused_in_gaps() {
+        let one = tiled_scene(Some(5));
+        desktop_admission(&one, &[(2500, 400).into(), (2100, 100).into()]).unwrap();
         assert_eq!(
-            desktop_admission(&scene, &[(10, 100).into()])
+            desktop_admission(&one, &[(10, 100).into()])
                 .unwrap_err()
                 .to_string(),
             "foreground_unavailable: point (10, 100) is past the edge of niri output winit, which the get_desktop_state screenshot shows"
+        );
+        // A raised second output leaves a gap above the first one: the
+        // bounding box spans y=-730 above eDP-1, where no output is.
+        let two = scene(
+            vec![],
+            vec![],
+            vec![
+                output("eDP-1", 0, 0, (1920, 1080), 1.0, "Normal"),
+                output("DP-2", 1920, -730, (2560, 1440), 1.0, "Normal"),
+            ],
+            false,
+        );
+        desktop_admission(&two, &[(100, 100).into(), (2100, -500).into()]).unwrap();
+        assert_eq!(
+            desktop_admission(&two, &[(900, -300).into()])
+                .unwrap_err()
+                .to_string(),
+            "foreground_unavailable: point (900, -300) is not on any enabled niri output in the current desktop frame; call get_desktop_state again"
         );
     }
 }
