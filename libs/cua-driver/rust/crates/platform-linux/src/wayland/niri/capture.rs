@@ -7,7 +7,7 @@ use super::*;
 
 // ── Window capture ───────────────────────────────────────────────────────────
 
-/// Where a window is in a single-output display capture, and the output
+/// Where a window is in its output's display capture, and the output
 /// geometry that mapping depends on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CapturePlan {
@@ -50,12 +50,11 @@ pub(super) fn capture_plan_in(
         .as_ref()
         .map_err(|unplaced| unplaced.reason())?;
     let (output, logical) = scene
-        .single_output()
-        .map_err(|_| "niri window capture supports a single output, and this layout has several")?;
-    if placed.output != output.name {
-        return Err("the window is not on the captured output");
-    }
-    if !placed.rect.inside(&placed.area) {
+        .output(&placed.output)
+        .map_err(|_| "niri reports no enabled output for the window")?;
+    // A window that fills its output can round one logical pixel past the
+    // output's truncated IPC size at a fractional scale.
+    if !placed.rect.inside_with_slack(&placed.area, 1) {
         return Err("the window extends past its output's edge");
     }
     if placed.overlapped() {
@@ -95,7 +94,7 @@ pub(super) fn capture_plan_in(
 pub fn capture_window(
     id: u64,
     pid: Option<u32>,
-    capture_display: impl FnOnce() -> Result<DisplayCapture>,
+    capture_display: impl FnOnce(&str) -> Result<DisplayCapture>,
 ) -> Result<(Vec<u8>, CapturePlan), String> {
     let mut ipc = ipc();
     capture_window_in(
@@ -110,7 +109,7 @@ fn capture_window_in(
     mut scene: impl FnMut(Instant) -> Result<Scene>,
     id: u64,
     pid: Option<u32>,
-    capture_display: impl FnOnce() -> Result<DisplayCapture>,
+    capture_display: impl FnOnce(&str) -> Result<DisplayCapture>,
 ) -> Result<(Vec<u8>, CapturePlan), String> {
     let mut plan_now = |deadline| -> Result<CapturePlan, String> {
         Ok(capture_plan_in(
@@ -122,7 +121,7 @@ fn capture_window_in(
     let plan = settled(&mut plan_now, CapturePlan::clone, || {
         "the niri window or its output is still changing".to_owned()
     })?;
-    let capture = capture_display().map_err(|e| format!("{e:#}"))?;
+    let capture = capture_display(&plan.output).map_err(|e| format!("{e:#}"))?;
     let now = plan_now(interaction::operation_deadline(QUERY_TIMEOUT))?;
     if !interaction::policy::fresh(&plan, &interaction::facts::Fact::Known(now)) {
         return Err("the niri window or its output changed during capture".into());
@@ -188,6 +187,56 @@ mod tests {
     }
 
     #[test]
+    fn crop_maps_a_tiled_window_in_the_current_view() {
+        let scene = scene(
+            vec![tiled_at(5, 1, (120.0, 40.0), (300.0, 200.0))],
+            vec![workspace(1, "DP-2", true, Some(5))],
+            vec![output("DP-2", 1000, 40, (1920, 1080), 1.5, "Normal")],
+            false,
+        );
+        assert_eq!(
+            capture_plan_in(&scene, 5, None),
+            Ok(CapturePlan {
+                pixels: Rect {
+                    x: 180,
+                    y: 60,
+                    width: 450,
+                    height: 300
+                },
+                width: 300,
+                height: 200,
+                output: "DP-2".into(),
+                area: Rect {
+                    x: 1000,
+                    y: 40,
+                    width: 1280,
+                    height: 720
+                },
+                scale: 1.5,
+                transform: 0,
+                image: (1920, 1080),
+            })
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_tile_may_round_one_pixel_past_its_output() {
+        // niri's IPC truncates the logical output size (2089x1175) while the
+        // window size rounds up (2090x1176); a fullscreen tile is still the
+        // whole output, not a window that extends past its edge.
+        let scene = scene(
+            vec![tiled_at(5, 1, (0.0, 0.0), (2090.0, 1176.0))],
+            vec![workspace(1, "HDMI-A-3", true, Some(5))],
+            vec![output("HDMI-A-3", 0, 0, (2560, 1440), 1.225, "Normal")],
+            false,
+        );
+        let plan = capture_plan_in(&scene, 5, None).unwrap();
+        assert_eq!(plan.output, "HDMI-A-3");
+        assert_eq!((plan.width, plan.height), (2090, 1176));
+        assert_eq!((plan.pixels.x, plan.pixels.y), (0, 0));
+    }
+
+    #[test]
     fn a_one_physical_pixel_overlap_at_a_fractional_scale_refuses() {
         // At 1.5 the target spans physical x 152..602 and the other tile
         // starts at physical 601. Rounded to logical pixels (101 and 401)
@@ -238,7 +287,7 @@ mod tests {
             },
             7,
             None,
-            || display("winit", (1280, 720)),
+            |_| display("winit", (1280, 720)),
         )
         .unwrap_err();
         assert_eq!(
@@ -253,7 +302,7 @@ mod tests {
         // name, area, scale and image size.
         let one = |_| Ok(one_output(vec![floating(7, 1, (100.0, 60.0), (300, 200))]));
         assert_eq!(
-            capture_window_in(one, 7, None, || oriented("winit", 0, (1280, 720))).unwrap_err(),
+            capture_window_in(one, 7, None, |_| oriented("winit", 0, (1280, 720))).unwrap_err(),
             "the capture was oriented for output transform 0, but the window's output has 6"
         );
         let mut calls = 0;
@@ -270,7 +319,7 @@ mod tests {
             },
             7,
             None,
-            || display("winit", (1280, 720)),
+            |_| display("winit", (1280, 720)),
         )
         .unwrap_err();
         assert_eq!(
@@ -290,7 +339,7 @@ mod tests {
             },
             7,
             None,
-            || display("winit", (1280, 720)),
+            |_| display("winit", (1280, 720)),
         );
         assert_eq!(settling.unwrap().1.area.width, 853);
         let mut x = 0.0;
@@ -301,7 +350,7 @@ mod tests {
             },
             7,
             None,
-            || display("winit", (1280, 720)),
+            |_| display("winit", (1280, 720)),
         );
         assert_eq!(
             moving.unwrap_err(),
@@ -313,18 +362,18 @@ mod tests {
     fn capture_refuses_another_output_or_size() {
         let one = |_| Ok(one_output(vec![floating(7, 1, (100.0, 60.0), (300, 200))]));
         assert_eq!(
-            capture_window_in(one, 7, None, || display("DP-1", (1280, 720))).unwrap_err(),
+            capture_window_in(one, 7, None, |_| display("DP-1", (1280, 720))).unwrap_err(),
             "the display capture copied output \"DP-1\", not the window's output \"winit\""
         );
         assert_eq!(
-            capture_window_in(one, 7, None, || display("winit", (1920, 1080))).unwrap_err(),
+            capture_window_in(one, 7, None, |_| display("winit", (1920, 1080))).unwrap_err(),
             "the capture is 1920x1080 pixels, but niri reports 1280x720 for output \"winit\""
         );
-        assert!(capture_window_in(one, 7, None, || display("winit", (1280, 720))).is_ok());
+        assert!(capture_window_in(one, 7, None, |_| display("winit", (1280, 720))).is_ok());
     }
 
     #[test]
-    fn crop_refuses_other_outputs_overlap_and_other_pids() {
+    fn crop_plans_each_output_and_refuses_overlap_and_other_pids() {
         let two_outputs = scene(
             vec![floating(7, 2, (100.0, 60.0), (300, 200))],
             vec![
@@ -337,9 +386,30 @@ mod tests {
             ],
             false,
         );
+        // The window is on the second output: its crop is relative to that
+        // output's logical origin, not the layout origin.
         assert_eq!(
             capture_plan_in(&two_outputs, 7, None),
-            Err("niri window capture supports a single output, and this layout has several")
+            Ok(CapturePlan {
+                pixels: Rect {
+                    x: 100,
+                    y: 60,
+                    width: 300,
+                    height: 200
+                },
+                width: 300,
+                height: 200,
+                output: "DP-2".into(),
+                area: Rect {
+                    x: 1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1080
+                },
+                scale: 1.0,
+                transform: 0,
+                image: (1920, 1080),
+            })
         );
         let overlapped = one_output(vec![
             floating(7, 1, (100.0, 60.0), (300, 200)),

@@ -68,8 +68,8 @@ impl Tool for GetDesktopStateTool {
                 } else {
                     None
                 };
-            // niri: the single output's frame, read before the capture and
-            // compared after it.
+            // niri: the desktop frame spanning every output, read before the
+            // capture and compared after it.
             let niri_frame = (crate::wayland::is_wayland() && crate::wayland::niri::is_session())
                 .then(|| crate::wayland::niri::desktop_snapshot().map(|snapshot| snapshot.frame))
                 .transpose()?;
@@ -119,8 +119,12 @@ impl Tool for GetDesktopStateTool {
             let (png, shot_w, shot_h, scale_factor) =
                 normalize_desktop_capture_for_action_frame(native_png, screen_w, screen_h)?;
             // One number for one desktop: get_screen_size reports this too.
-            let scale_factor = kwin_frame
+            // A composed multi-output frame is at logical size, so the
+            // normalization ratio would report 1.0 even when an output is
+            // scaled; use the frame's largest output scale instead.
+            let scale_factor = niri_frame
                 .as_ref()
+                .or(kwin_frame.as_ref())
                 .map_or(scale_factor, |frame| frame.scale);
             // Opt-in long-edge cap: the full-size capture is the desktop
             // action frame; a capped image is mapped back at dispatch
@@ -162,7 +166,7 @@ impl Tool for GetDesktopStateTool {
                 frame.rebase_windows(&mut windows);
             } else if let Some(frame) = &niri_frame {
                 // niri window geometry is in layout coordinates; screenshot
-                // pixel (0, 0) is the single output's logical origin.
+                // pixel (0, 0) is the desktop frame's origin.
                 anyhow::ensure!(
                     crate::wayland::niri::desktop_snapshot()?.frame == *frame,
                     "the niri output layout changed during get_desktop_state; call it again"

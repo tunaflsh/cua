@@ -389,6 +389,21 @@ struct CaptureState {
     failed: bool,
 }
 
+/// One advertised wl_output and its wl_output v4 name. Capture addresses an
+/// output by name, so every output must keep its own; the first output's
+/// mode and transform stay in [`State`] for virtual-pointer centring.
+#[derive(Clone, Debug)]
+struct OutputState {
+    handle: WlOutput,
+    name: Option<String>,
+}
+
+impl OutputState {
+    fn new(handle: WlOutput) -> Self {
+        Self { handle, name: None }
+    }
+}
+
 #[derive(Default)]
 struct State {
     manager: Option<ZwlrForeignToplevelManagerV1>,
@@ -400,8 +415,12 @@ struct State {
     // Virtual-pointer manager + output dimensions, so `click` can land a real
     // button press at the output centre (over the just-activated window).
     vptr_manager: Option<ZwlrVirtualPointerManagerV1>,
+    /// Every wl_output the compositor advertised, in registry order.
+    outputs: Vec<OutputState>,
+    /// The first output, used for virtual-pointer centring and the unaddressed
+    /// single-output size fallback.
     output: Option<WlOutput>,
-    /// wl_output v4 name of `output`, the output screencopy copies.
+    /// wl_output v4 name of `output`.
     output_name: Option<String>,
     // Logical (post-transform) output size: virtual-pointer absolute motion
     // maps onto the output's logical box, so rotated outputs swap axes.
@@ -572,8 +591,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             } else if interface == WlOutput::interface().name {
                 let out = registry.bind::<WlOutput, _, _>(name, version.min(4), qh, ());
                 if state.output.is_none() {
-                    state.output = Some(out);
+                    state.output = Some(out.clone());
                 }
+                state.outputs.push(OutputState::new(out));
             } else if interface == ZwlrScreencopyManagerV1::interface().name {
                 state.scrcopy_manager = Some(registry.bind::<ZwlrScreencopyManagerV1, _, _>(
                     name,
@@ -612,15 +632,28 @@ impl Dispatch<WlOutput, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        let Some(index) = state
+            .outputs
+            .iter()
+            .position(|tracked| tracked.handle == *output)
+        else {
+            return;
+        };
+        let first = state.output.as_ref() == Some(output);
         if let wl_output::Event::Name { name } = &event {
-            if state.output.as_ref() == Some(output) {
+            state.outputs[index].name = Some(name.clone());
+            if first {
                 state.output_name = Some(name.clone());
             }
             return;
         }
-        // Remember the output resolution so `click` can aim at its centre.
-        // Modes are reported in the panel's native orientation; the geometry
-        // transform turns them into the logical frame input coordinates use.
+        // Remember the output resolution so capture and `click` can address
+        // this output. Modes are reported in the panel's native orientation;
+        // the geometry transform turns them into the logical frame input
+        // coordinates use.
+        if !first {
+            return;
+        }
         match event {
             wl_output::Event::Mode { width, height, .. } => {
                 state.output_mode = (width.max(0) as u32, height.max(0) as u32);
@@ -913,6 +946,25 @@ fn capture_via_screencopy() -> anyhow::Result<Vec<u8>> {
 /// [`capture_via_screencopy`], plus the wl_output v4 name of the copied
 /// output when the compositor reports one.
 fn screencopy_first_output() -> anyhow::Result<(Vec<u8>, Option<String>)> {
+    screencopy_selected_output(None)
+}
+
+/// Capture one wl_output chosen by its v4 name. Compositors expose wl_output
+/// objects in registry order, which has nothing to do with the output a
+/// caller means, so capture must address the object by the name the
+/// compositor reports.
+fn screencopy_output_named(name: &str) -> anyhow::Result<Vec<u8>> {
+    let (png, captured) = screencopy_selected_output(Some(name))?;
+    if captured.as_deref() != Some(name) {
+        anyhow::bail!("the compositor did not confirm it copied output {name:?}");
+    }
+    Ok(png)
+}
+
+/// Screencopy one output: the first advertised one when `wanted` is `None`,
+/// otherwise the output whose wl_output v4 name equals `wanted`. Returns the
+/// PNG and the name the compositor reported for the copied output.
+fn screencopy_selected_output(wanted: Option<&str>) -> anyhow::Result<(Vec<u8>, Option<String>)> {
     // The whole copy, connection included, waits at most this long.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     // On niri every round trip is bounded by it as well, so a stalled niri
@@ -936,10 +988,25 @@ fn screencopy_first_output() -> anyhow::Result<(Vec<u8>, Option<String>)> {
         .shm
         .clone()
         .ok_or_else(|| anyhow::anyhow!("compositor does not expose wl_shm"))?;
-    let output = state
-        .output
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("compositor exposed no wl_output to capture"))?;
+    let (output, copied_name) = match wanted {
+        Some(wanted) => {
+            let tracked = state
+                .outputs
+                .iter()
+                .find(|output| output.name.as_deref() == Some(wanted))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("compositor exposed no wl_output named {wanted:?}")
+                })?;
+            (tracked.handle.clone(), tracked.name.clone())
+        }
+        None => (
+            state
+                .output
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("compositor exposed no wl_output to capture"))?,
+            state.output_name.clone(),
+        ),
+    };
 
     let frame = manager.capture_output(0, &output, &qh, ());
     // Drain Buffer / Flags events; spin until Ready or Failed (or timeout).
@@ -1051,7 +1118,7 @@ fn screencopy_first_output() -> anyhow::Result<(Vec<u8>, Option<String>)> {
     );
     cleanup_mmap(mmap_ptr, mmap_len, fd);
 
-    result.map(|png| (png, state.output_name.take()))
+    result.map(|png| (png, copied_name))
 }
 
 /// Allocate an anonymous shared-memory file of `size` bytes and mmap it RW.
@@ -1309,23 +1376,20 @@ fn screenshot_dispatch_for_pid(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec
     )
 }
 
-/// A niri display capture: only the attested wlroots screencopy, oriented by
-/// the copied output's own transform. grim, ext-image-copy and the portal
-/// are not tied to the attested compositor or orient differently, so niri
-/// never falls back to them.
-fn niri_display_capture() -> anyhow::Result<niri::DisplayCapture> {
+/// Capture one named niri output with only the attested wlroots screencopy,
+/// oriented by that output's own transform. grim, ext-image-copy and the
+/// portal are not tied to the attested compositor or orient differently, so
+/// niri never falls back to them.
+fn niri_capture_output(output: &str) -> anyhow::Result<niri::DisplayCapture> {
     // Read the transforms on both sides of the copy: a change in between
     // would orient the buffer with a transform it was not taken in.
     let before = niri::output_transforms()?;
-    let (png, output) = screencopy_first_output()?;
-    let output = output.ok_or_else(|| {
-        anyhow::anyhow!("niri capture needs the wl_output name (wl_output v4) of the copied output")
-    })?;
-    let transform = niri::output_transforms()?
-        .get(&output)
+    let transform = before
+        .get(output)
         .copied()
         .ok_or_else(|| anyhow::anyhow!("niri reports no enabled output {output:?}"))?;
-    if before.get(&output) != Some(&transform) {
+    let png = screencopy_output_named(output)?;
+    if niri::output_transforms()?.get(output) != Some(&transform) {
         anyhow::bail!("the transform of niri output {output:?} changed during capture");
     }
     let png = orient_png_for_niri_transform(png, transform)?;
@@ -1334,10 +1398,36 @@ fn niri_display_capture() -> anyhow::Result<niri::DisplayCapture> {
         .into_dimensions()?;
     Ok(niri::DisplayCapture {
         png,
-        output,
+        output: output.to_owned(),
         transform,
         size,
     })
+}
+
+/// A niri desktop capture. One output keeps the physical-resolution copy so
+/// pixel-only callers see native detail; several outputs are composed into
+/// the logical desktop frame, where every screenshot pixel is an action
+/// coordinate. The output layout is read on both sides of the capture, and a
+/// change in between refuses rather than pairing the image with a newer
+/// layout.
+fn niri_display_capture_png() -> anyhow::Result<Vec<u8>> {
+    let frame = niri::desktop_snapshot()?.frame;
+    if frame.outputs.len() <= 1 {
+        let output = frame
+            .outputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("niri has no enabled output"))?;
+        return Ok(niri_capture_output(&output.name)?.png);
+    }
+    let canvas = compose_frame(&frame, |output| {
+        let capture = niri_capture_output(&output.name)?;
+        Ok(image::load_from_memory_with_format(&capture.png, image::ImageFormat::Png)?.to_rgba8())
+    })?;
+    anyhow::ensure!(
+        niri::desktop_snapshot()?.frame == frame,
+        "the niri output layout changed during capture; call get_desktop_state again"
+    );
+    encode_rgba_png(canvas)
 }
 
 /// niri has no per-toplevel capture protocol: crop a settled display capture
@@ -1345,7 +1435,7 @@ fn niri_display_capture() -> anyhow::Result<niri::DisplayCapture> {
 /// logical size, the window-local coordinate frame input uses. A tiled
 /// window refuses: niri does not report where it is.
 fn niri_window_capture(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec<u8>> {
-    let (png, plan) = niri::capture_window(xid, pid, niri_display_capture)
+    let (png, plan) = niri::capture_window(xid, pid, niri_capture_output)
         .map_err(|reason| surface_identity_unproven(xid, format!("niri: {reason}")))?;
     let pixels = plan.pixels;
     let crop = crop_png_to_rect(
@@ -1399,6 +1489,56 @@ fn crop_png_to_rect(
     Ok(cursor.into_inner())
 }
 
+/// Place each output's capture at its logical rectangle inside `frame`.
+///
+/// Compositor-agnostic: each adapter supplies the per-output capture and
+/// keeps its own route, while the frame composition — resize to logical size
+/// and paste at the output's rectangle — is shared, so a multi-monitor
+/// screenshot pixel means the same thing on every compositor. A scaled
+/// output's capture must be a uniform scaling of the image; otherwise the
+/// compositor's reported scale and the captured pixels disagree and the frame
+/// is refused rather than silently stretched.
+pub(crate) fn compose_frame(
+    frame: &hyprland::DesktopFrame,
+    mut capture: impl FnMut(&hyprland::FrameOutput) -> anyhow::Result<image::RgbaImage>,
+) -> anyhow::Result<image::RgbaImage> {
+    let mut canvas = image::RgbaImage::new(frame.width, frame.height);
+    for output in &frame.outputs {
+        let mut image = capture(output)?;
+        if (image.width(), image.height()) != (output.width, output.height) {
+            let scale_x = f64::from(image.width()) / f64::from(output.width);
+            let scale_y = f64::from(image.height()) / f64::from(output.height);
+            if (scale_x - scale_y).abs() > 0.01 {
+                anyhow::bail!(
+                    "output {} captured at {}x{}, which does not scale uniformly to its {}x{} \
+                     logical size",
+                    output.name,
+                    image.width(),
+                    image.height(),
+                    output.width,
+                    output.height
+                );
+            }
+            image = image::imageops::resize(
+                &image,
+                output.width,
+                output.height,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+        let (left, top) = frame.from_layout(output.x, output.y);
+        image::imageops::replace(&mut canvas, &image, i64::from(left), i64::from(top));
+    }
+    Ok(canvas)
+}
+
+/// Encode a composed RGBA canvas as PNG.
+pub(crate) fn encode_rgba_png(canvas: image::RgbaImage) -> anyhow::Result<Vec<u8>> {
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(canvas).write_to(&mut encoded, image::ImageFormat::Png)?;
+    Ok(encoded.into_inner())
+}
+
 /// Display-level capture dispatcher. Cascade:
 /// 1. Opt-in GNOME compositor helper. If available, capture failure is
 ///    terminal rather than cascading into GNOME's portal implementation.
@@ -1413,7 +1553,7 @@ fn crop_png_to_rect(
 /// 6. X11: existing root-window path.
 pub fn screenshot_display_dispatch() -> anyhow::Result<Vec<u8>> {
     if niri::is_session() {
-        return niri_display_capture().map(|capture| capture.png);
+        return niri_display_capture_png();
     }
     if is_wayland() && hyprland::is_session() {
         // The desktop action frame spans every powered output. The cascade
@@ -2352,8 +2492,9 @@ fn centres_origin_click(x: i32, y: i32, layout_addressed: bool) -> bool {
 /// On niri, admit the action's pointer input through [`niri::prepare_target`]:
 /// input addressed to a window, by id or by an outer foreground target,
 /// proves each layout point lands on that window and then activates it.
-/// Desktop-scope input names no window: its points are pixels of the single
-/// output. Recheck the gate with [`niri_gate_holds`] before each event.
+/// Desktop-scope input names no window: its points are pixels of the desktop
+/// frame, which spans every output. Recheck the gate with
+/// [`niri_gate_holds`] before each event.
 fn niri_pointer_gate(
     window_id: Option<u64>,
     desktop: Option<&DesktopInputSpace>,

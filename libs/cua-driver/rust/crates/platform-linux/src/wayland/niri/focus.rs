@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn a_niri_refusal_suggests_the_remedy_its_detail_names() {
         let tiled = aim_at(&tiled_scene(Some(5)).window(5).unwrap(), 10, 20).unwrap_err();
-        assert!(tiled.to_string().contains("float the window"));
+        assert!(tiled.to_string().contains("bring the window into view"));
         assert!(refusal_suggestion(&tiled.to_string())
             .unwrap()
             .starts_with("Take a new screenshot"));

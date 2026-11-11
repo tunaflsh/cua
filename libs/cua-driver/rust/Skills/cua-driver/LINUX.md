@@ -421,16 +421,20 @@ that names the remedy.
 - Floating windows get window capture, cropped from the output, and
   window-coordinate pointer input from niri's floating geometry. A point under
   another floating window refuses, because niri reports no stacking order.
-- Tiled windows, niri's default layout, refuse window capture and
-  window-coordinate pointer input: niri does not report where they are.
-  `get_window_state` still returns their accessibility tree, and element
-  actions work. For pixels, call `get_desktop_state` and act at desktop scope
-  (no `pid` or `window_id`), or float the window.
-- Desktop-scope pointer input takes pixels of the single output, as
-  `get_desktop_state` shows it, and refuses points past the output edge.
-  niri does not report where tiled windows are or every scroll of its view,
-  so the driver does not prove a screenshot is still current: take a new one
-  after anything that may have moved the layout.
+- Tiled windows in the current workspace view, including a fullscreen tiled
+  window, get window capture and window-coordinate pointer input from
+  `tile_pos_in_workspace_view`, `window_offset_in_tile` and `window_size`.
+  An off-view tiled window has no reported position and refuses; its
+  accessibility tree and element actions still work. For its pixels, call
+  `get_desktop_state` and act at desktop scope (no `pid` or `window_id`), or
+  bring it into view.
+- Desktop-scope pointer input takes pixels of the desktop frame as
+  `get_desktop_state` shows it. With several outputs the frame is their
+  bounding box: each output is captured and placed at its logical rectangle,
+  and a point in a gap between monitors, or past an output edge, refuses.
+  niri reports only the current view of a workspace, so the driver does not
+  prove a screenshot is still current: take a new one after anything that may
+  have moved the layout.
 - Window-coordinate pointer input and window capture first wait, at most
   five reads 30 ms apart, for two consecutive reads that agree on the
   window's place, and refuse a window that keeps moving. They then check it
@@ -445,12 +449,16 @@ that names the remedy.
   window that had it. `right_click` and `set_value` leave the target focused,
   as on Sway: giving focus back would close the menu they opened. Text and keys
   use niri's own keymap, and focus is checked before every key.
-- `list_windows` gives tiled windows 0x0 bounds, and a tiled window reads
-  `is_on_screen:true` only while it is the active window of a shown workspace.
-  With a floating window active, visible tiled windows read `false`, so do not
-  filter niri windows on `is_on_screen`.
-- With more than one output, window capture, `get_desktop_state`,
-  window-coordinate pointer input, and desktop-scope input refuse.
+- `list_windows` gives an in-view tiled window its tile/window bounds; an
+  off-view tiled window has no bounds and does not read `is_on_screen`.
+  A tiled window hidden behind an output-sized fullscreen tile also does not
+  read `is_on_screen`, because niri IPC has no fullscreen flag; do not treat
+  that alone as "closed".
+- Several outputs are supported: window capture reads the wl_output the window
+  is on, and `get_desktop_state` composes every output into the logical
+  desktop frame. Window-coordinate input uses layout coordinates, which span
+  all outputs. A rotated output among several is composed after its transform
+  is applied.
 - A floating window that moves between the coordinate translation and the
   input refuses the input; take a new screenshot and retry.
 

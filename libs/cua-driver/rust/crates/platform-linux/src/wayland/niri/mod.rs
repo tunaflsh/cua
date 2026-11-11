@@ -9,11 +9,12 @@
 //! recognised, an IPC failure refuses instead of falling back to the generic
 //! wlr-foreign-toplevel title join, which would lose the niri id namespace.
 //!
-//! niri 26.04 reports a position only for floating windows
-//! (`tile_pos_in_workspace_view`): a tiled window's place depends on the
-//! view's scroll position, which IPC does not report. Window capture and
-//! window-coordinate pointer input therefore refuse a tiled window; the
-//! desktop scope reaches it with pixels of the single output.
+//! niri reports `tile_pos_in_workspace_view` for windows in the current
+//! workspace view, both floating and tiled. That is the tile's position on
+//! the output, already accounting for the view's scroll. A tiled window
+//! outside the current view has no such position, so window capture and
+//! window-coordinate pointer input refuse it; the desktop scope reaches it
+//! with pixels of the desktop frame.
 //!
 //! Pointer input and window capture first wait, a few short reads at most,
 //! for two consecutive reads that agree on the target, then check the layout
@@ -97,23 +98,16 @@ pub fn pointer_space() -> Result<(i32, i32, u32, u32)> {
     pointer_space_of(&ipc().query(Request::Outputs)?)
 }
 
-/// The desktop frame (the single output's logical rectangle) and the pointer
-/// layout, from one snapshot.
+/// The desktop frame (the bounding box of every laid-out output) and the
+/// pointer layout, from one snapshot. Screenshot pixel (0, 0) is the frame
+/// origin, which can lie above or left of a monitor's own logical origin.
 pub fn desktop_snapshot() -> Result<super::hyprland::DesktopSnapshot> {
     desktop_snapshot_in(&ipc().scene()?)
 }
 
 fn desktop_snapshot_in(scene: &Scene) -> Result<super::hyprland::DesktopSnapshot> {
-    let (output, logical) = scene.single_output()?;
     Ok(super::hyprland::DesktopSnapshot {
-        frame: super::hyprland::DesktopFrame {
-            x: logical.x,
-            y: logical.y,
-            width: logical.width,
-            height: logical.height,
-            scale: logical.scale,
-            outputs: vec![frame_output(output, logical)],
-        },
+        frame: screen_frame_in(scene)?,
         pointer: Some(scene.pointer_space()?),
     })
 }
@@ -129,8 +123,8 @@ fn frame_output(output: &IpcOutput, logical: &IpcLogical) -> super::hyprland::Fr
 }
 
 /// Every enabled output's logical rectangle, and their bounding box with the
-/// largest scale, as Hyprland reports its frame. Desktop-scope input still
-/// needs a single output; reporting sizes does not.
+/// largest scale, as Hyprland reports its frame. The desktop screenshot,
+/// the action frame and the virtual pointer all use this bounding box.
 fn screen_frame_in(scene: &Scene) -> Result<super::hyprland::DesktopFrame> {
     let mut outputs = Vec::new();
     let mut scale: f64 = 0.0;
@@ -197,7 +191,7 @@ pub fn output_transforms() -> Result<HashMap<String, u32>> {
 }
 
 /// Doctor note: `None` without `NIRI_SOCKET`, otherwise whether this process
-/// drives niri, its version and the single-output limit.
+/// drives niri, its version and how many outputs it lays out.
 pub fn health_note() -> Option<String> {
     if std::env::var_os("NIRI_SOCKET").is_none_or(|socket| socket.is_empty()) {
         return None;
@@ -239,8 +233,8 @@ fn describe_health(version: &str, outputs: Result<usize>) -> String {
     match outputs {
         Ok(1) => format!("niri {version}: IPC attested to WAYLAND_DISPLAY."),
         Ok(count) => format!(
-            "niri {version}: IPC attested to WAYLAND_DISPLAY; window capture and desktop \
-             input refuse because {count} outputs are enabled (one is supported)."
+            "niri {version}: IPC attested to WAYLAND_DISPLAY; {count} outputs are enabled and \
+             the desktop frame spans all of them."
         ),
         Err(error) => format!(
             "niri {version}: IPC attested to WAYLAND_DISPLAY; the output layout is \
@@ -285,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_snapshot_uses_the_single_output_and_refuses_several() {
+    fn desktop_snapshot_spans_every_output() {
         let one = scene(
             vec![],
             vec![],
@@ -313,9 +307,38 @@ mod tests {
             ],
             false,
         );
+        let snapshot = desktop_snapshot_in(&two).unwrap();
         assert_eq!(
-            desktop_snapshot_in(&two).unwrap_err().to_string(),
-            "niri window capture and desktop input support a single output; this layout has 2"
+            (
+                snapshot.frame.x,
+                snapshot.frame.y,
+                snapshot.frame.width,
+                snapshot.frame.height
+            ),
+            (0, 0, 3840, 1080)
+        );
+        assert_eq!(snapshot.frame.outputs.len(), 2);
+        assert_eq!(snapshot.pointer, Some((0, 0, 3840, 1080)));
+        // The desktop frame spans both outputs, including the gap above the
+        // raised second monitor: frame pixel 0 is the topmost layout edge.
+        let stacked = scene(
+            vec![],
+            vec![],
+            vec![
+                output("eDP-1", 0, 0, (1920, 1080), 1.0, "Normal"),
+                output("DP-2", 1280, -730, (2560, 1440), 1.0, "Normal"),
+            ],
+            false,
+        );
+        let snapshot = desktop_snapshot_in(&stacked).unwrap();
+        assert_eq!(
+            (
+                snapshot.frame.x,
+                snapshot.frame.y,
+                snapshot.frame.width,
+                snapshot.frame.height
+            ),
+            (0, -730, 3840, 1810)
         );
     }
 
@@ -339,12 +362,12 @@ mod tests {
     }
 
     #[test]
-    fn health_note_states_attestation_and_the_single_output_limit() {
+    fn health_note_states_attestation_and_the_output_count() {
         assert_eq!(
             describe_health("26.04 (8ed0da4)", Ok(1)),
             "niri 26.04 (8ed0da4): IPC attested to WAYLAND_DISPLAY."
         );
-        assert!(describe_health("26.04", Ok(2)).contains("refuse because 2 outputs are enabled"));
+        assert!(describe_health("26.04", Ok(2)).contains("2 outputs are enabled"));
         assert_eq!(
             inactive_health(Attestation::Unrelated(
                 "NIRI_SOCKET is served by pid 1 but WAYLAND_DISPLAY by pid 2".into()

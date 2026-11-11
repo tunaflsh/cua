@@ -689,13 +689,11 @@ fn desktop_capture_plan_from_monitors(monitors: Vec<DisplayMonitor>) -> Result<D
 
 /// Compose `frame` from per-output captures (see [`composite_desktop_capture`]).
 pub fn compose_desktop_capture(frame: &DesktopFrame) -> Result<Vec<u8>> {
-    let canvas = compose_frame(frame, |output| {
+    let canvas = super::compose_frame(frame, |output| {
         let png = capture_output_png(&output.name)?;
         Ok(image::load_from_memory_with_format(&png, image::ImageFormat::Png)?.to_rgba8())
     })?;
-    let mut encoded = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(canvas).write_to(&mut encoded, image::ImageFormat::Png)?;
-    Ok(encoded.into_inner())
+    super::encode_rgba_png(canvas)
 }
 
 fn capture_output_png(name: &str) -> Result<Vec<u8>> {
@@ -711,43 +709,6 @@ fn capture_output_png(name: &str) -> Result<Vec<u8>> {
         );
     }
     Ok(out.stdout)
-}
-
-/// Place each output's capture at its logical rectangle inside the frame. A
-/// scaled output's capture is resized to its logical size, which must be a
-/// uniform scaling of the captured image.
-fn compose_frame(
-    frame: &DesktopFrame,
-    mut capture: impl FnMut(&FrameOutput) -> Result<image::RgbaImage>,
-) -> Result<image::RgbaImage> {
-    let mut canvas = image::RgbaImage::new(frame.width, frame.height);
-    for output in &frame.outputs {
-        let mut image = capture(output)?;
-        if (image.width(), image.height()) != (output.width, output.height) {
-            let scale_x = f64::from(image.width()) / f64::from(output.width);
-            let scale_y = f64::from(image.height()) / f64::from(output.height);
-            if (scale_x - scale_y).abs() > 0.01 {
-                bail!(
-                    "output {} captured at {}x{}, which does not scale uniformly to its {}x{} \
-                     logical size",
-                    output.name,
-                    image.width(),
-                    image.height(),
-                    output.width,
-                    output.height
-                );
-            }
-            image = image::imageops::resize(
-                &image,
-                output.width,
-                output.height,
-                image::imageops::FilterType::Lanczos3,
-            );
-        }
-        let (left, top) = frame.from_layout(output.x, output.y);
-        image::imageops::replace(&mut canvas, &image, i64::from(left), i64::from(top));
-    }
-    Ok(canvas)
 }
 
 /// wl_output transform of the single active output. Full-display screencopy
@@ -1782,7 +1743,7 @@ mod tests {
         let mut above = scaled_monitor(4, 4, 2.0);
         (above.name, above.y) = ("above".into(), -2);
         let frame = desktop_frame_from_monitors(vec![panel, above]).unwrap();
-        let canvas = compose_frame(&frame, |output| {
+        let canvas = super::super::compose_frame(&frame, |output| {
             Ok(match output.name.as_str() {
                 "above" => image::RgbaImage::from_pixel(4, 4, red),
                 _ => image::RgbaImage::from_pixel(2, 2, blue),
@@ -1797,7 +1758,8 @@ mod tests {
             assert_eq!(*canvas.get_pixel(x, 3), blue);
         }
 
-        let error = compose_frame(&frame, |_| Ok(image::RgbaImage::new(4, 2))).unwrap_err();
+        let error =
+            super::super::compose_frame(&frame, |_| Ok(image::RgbaImage::new(4, 2))).unwrap_err();
         assert!(
             error.to_string().contains("does not scale uniformly"),
             "{error}"

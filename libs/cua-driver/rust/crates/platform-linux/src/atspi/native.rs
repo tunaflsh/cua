@@ -1228,7 +1228,7 @@ mod hyprland_frame_tests {
 
     #[test]
     fn niri_binds_a_tiled_chromium_root_by_size() {
-        // niri reports no position for tiled windows, but their size still
+        // An off-view tiled window has no position, but its size still
         // identifies the BrowserRootView whose title carries the profile.
         let tiled = |id, title: &str, size| crate::wayland::niri::Window {
             id,
@@ -1240,7 +1240,7 @@ mod hyprland_frame_tests {
             focus_rank: 0,
             on_screen: true,
             size: Some(size),
-            placement: Err(crate::wayland::niri::Unplaced::Tiled),
+            placement: Err(crate::wayland::niri::Unplaced::NoViewPosition),
         };
         let owned = [
             niri_client(&tiled(1, "Page - Google Chrome", (800, 600))),

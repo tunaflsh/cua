@@ -64,13 +64,25 @@ impl Tool for GetCursorPositionTool {
         // global cursor position. Fall back to the synthetic registry that
         // records every `motion_absolute` this process emits.
         if crate::wayland::is_wayland() {
-            // The registry holds layout coordinates; KWin's desktop frame can
-            // start elsewhere, and agents read this in that frame.
-            let layout = tokio::task::spawn_blocking(crate::wayland::kwin_desktop_layout).await;
+            // The registry holds layout coordinates. Agents read this in the
+            // desktop frame that get_desktop_state and desktop actions use, so
+            // convert through the compositor's frame. With several outputs
+            // that frame's origin can be above or left of (0, 0).
+            let layout = tokio::task::spawn_blocking(|| {
+                if crate::wayland::niri::is_session() {
+                    crate::wayland::niri::desktop_snapshot().map(|snapshot| Some(snapshot.frame))
+                } else {
+                    crate::wayland::kwin_desktop_layout()
+                        .map(|layout| layout.map(|layout| layout.frame))
+                }
+            })
+            .await;
             let frame = match layout {
-                Ok(Ok(layout)) => layout.map(|layout| layout.frame),
+                Ok(Ok(frame)) => frame,
                 Ok(Err(e)) => {
-                    return ToolResult::error(format!("Could not read the KWin layout: {e:#}"))
+                    return ToolResult::error(format!(
+                        "Could not read the compositor layout: {e:#}"
+                    ))
                 }
                 Err(e) => return ToolResult::error(format!("Task error: {e}")),
             };
