@@ -52,8 +52,8 @@ impl Tool for GetScreenSizeTool {
                 return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
             }
             if crate::wayland::is_wayland() && crate::wayland::niri::is_session() {
-                // niri reports logical output geometry and its fractional
-                // scale over attested IPC, for a single-output layout.
+                // niri reports logical output geometry and fractional scales
+                // over attested IPC.
                 let (frame, monitors) = crate::wayland::niri::screen_report()?;
                 return Ok((frame.width, frame.height, frame.scale, Some(monitors)));
             }
