@@ -1006,31 +1006,36 @@ fn screencopy_first_output() -> anyhow::Result<(Vec<u8>, Option<String>)> {
         let w = state.capture.width;
         let h = state.capture.height;
         let stride = state.capture.stride as usize;
-        let format = state.capture.format.unwrap_or(0);
+        let format = wl_shm::Format::try_from(state.capture.format.unwrap_or(0)).ok();
         if mmap_ptr.is_null() || mmap_len == 0 {
             anyhow::bail!("screencopy ready without a backing buffer");
         }
         let raw = unsafe { std::slice::from_raw_parts(mmap_ptr as *const u8, mmap_len) };
         let mut rgba = Vec::with_capacity((w as usize) * (h as usize) * 4);
-        for row in 0..(h as usize) {
-            let src_row = if state.capture.y_invert {
-                (h as usize) - 1 - row
-            } else {
-                row
-            };
-            let base = src_row * stride;
-            for col in 0..(w as usize) {
-                let px = &raw[base + col * 4..base + col * 4 + 4];
-                let (r, g, b, a) = match wl_shm::Format::try_from(format).ok() {
-                    // Argb8888 / Xrgb8888 over wl_shm are little-endian BGRA / BGRX.
-                    Some(wl_shm::Format::Argb8888) => (px[2], px[1], px[0], px[3]),
-                    Some(wl_shm::Format::Xrgb8888) => (px[2], px[1], px[0], 255),
-                    Some(wl_shm::Format::Abgr8888) => (px[0], px[1], px[2], px[3]),
-                    Some(wl_shm::Format::Xbgr8888) => (px[0], px[1], px[2], 255),
-                    _ => (px[2], px[1], px[0], px[3]),
+        let y_invert = state.capture.y_invert;
+        // Choose the channel layout once rather than per pixel: a 4K output
+        // is 8M pixels, and the decode is on the screenshot latency path.
+        let copy = |rgba: &mut Vec<u8>, map: fn(&[u8]) -> [u8; 4]| {
+            for row in 0..(h as usize) {
+                let src_row = if y_invert {
+                    (h as usize) - 1 - row
+                } else {
+                    row
                 };
-                rgba.extend_from_slice(&[r, g, b, a]);
+                let base = src_row * stride;
+                for col in 0..(w as usize) {
+                    let px = &raw[base + col * 4..base + col * 4 + 4];
+                    rgba.extend_from_slice(&map(px));
+                }
             }
+        };
+        match format {
+            // Argb8888 / Xrgb8888 over wl_shm are little-endian BGRA / BGRX.
+            Some(wl_shm::Format::Argb8888) => copy(&mut rgba, |px| [px[2], px[1], px[0], px[3]]),
+            Some(wl_shm::Format::Xrgb8888) => copy(&mut rgba, |px| [px[2], px[1], px[0], 255]),
+            Some(wl_shm::Format::Abgr8888) => copy(&mut rgba, |px| [px[0], px[1], px[2], px[3]]),
+            Some(wl_shm::Format::Xbgr8888) => copy(&mut rgba, |px| [px[0], px[1], px[2], 255]),
+            _ => copy(&mut rgba, |px| [px[2], px[1], px[0], px[3]]),
         }
         cua_driver_core::image_utils::encode_rgba_to_png(&rgba, w, h)
     })();
