@@ -68,6 +68,9 @@ struct Key {
     code: u32,
     modifiers: u32,
     group: u32,
+    /// Left-hand evdev modifier keys to hold for this key, in press order.
+    modifier_codes: [u32; 5],
+    modifier_count: u8,
 }
 
 /// Consecutive keys typed with one keymap: niri's own when `extended` is
@@ -316,11 +319,37 @@ fn find(xkb: &Xkb1, map: &xkb::Keymap, group: u32, sym: xkb::Keysym) -> Option<K
         state.update_mask(modifiers, 0, 0, 0, 0, group);
         (state.key_get_one_sym(code) == sym).then_some((modifiers.count_ones(), modifiers))
     })?;
+    let (modifier_codes, modifier_count) = modifier_keys(map, modifiers);
     Some(Key {
         code,
         modifiers,
         group,
+        modifier_codes,
+        modifier_count,
     })
+}
+
+/// Evdev keys for the xkb modifiers in `mask`. Sending real modifier key
+/// events is reliable across niri's virtual-keyboard keymap swap; the
+/// `modifiers` request alone was not applied to the following key.
+fn modifier_keys(map: &xkb::Keymap, mask: u32) -> ([u32; 5], u8) {
+    const KEYS: [(&str, u32); 5] = [
+        (xkb::MOD_NAME_SHIFT, 42),             // KEY_LEFTSHIFT
+        (xkb::MOD_NAME_CTRL, 29),              // KEY_LEFTCTRL
+        (xkb::MOD_NAME_ALT, 56),               // KEY_LEFTALT
+        (xkb::MOD_NAME_LOGO, 125),             // KEY_LEFTMETA
+        (xkb::MOD_NAME_ISO_LEVEL3_SHIFT, 100), // KEY_RIGHTALT
+    ];
+    let mut codes = [0u32; 5];
+    let mut count = 0u8;
+    for (name, code) in KEYS {
+        let bit = 1u32.checked_shl(map.mod_get_index(name));
+        if bit.is_some_and(|bit| mask & bit != 0) {
+            codes[usize::from(count)] = code;
+            count += 1;
+        }
+    }
+    (codes, count)
 }
 
 /// The key `name` (an X keysym name, exact or else in any case) with
@@ -353,6 +382,7 @@ fn plan_key(xkb: &Xkb1, map: &str, group: u32, modifiers: &[String], name: &str)
             .checked_shl(keymap.mod_get_index(name))
             .ok_or_else(|| refused(format!("niri's keymap has no {name} modifier")))?;
     }
+    (key.modifier_codes, key.modifier_count) = modifier_keys(&keymap, key.modifiers);
     Ok(key)
 }
 
@@ -675,19 +705,26 @@ impl Strokes for Keyboard {
         Ok(())
     }
 
-    fn stroke(&mut self, key: Key, group: u32, deadline: Instant) -> Result<()> {
+    fn stroke(&mut self, key: Key, _: u32, deadline: Instant) -> Result<()> {
         // Nothing goes out once the tool call is over (see
         // `crate::input::action`).
-        let (device, queue) = (&self.device, &self.queue);
+        let count = usize::from(key.modifier_count);
+        let modifiers = &key.modifier_codes[..count];
+        self.pressed.extend(modifiers.iter().copied());
+        self.pressed.push(key.code);
         crate::input::action::admit(|| {
-            device.modifiers(key.modifiers, 0, 0, key.group);
-            device.key(super::super::event_time_ms(), key.code, KEY_PRESSED);
-            device.key(super::super::event_time_ms(), key.code, KEY_RELEASED);
-            device.modifiers(0, 0, 0, group);
-            queue.flush()
+            let now = super::super::event_time_ms();
+            for code in modifiers {
+                self.device.key(now, *code, KEY_PRESSED);
+            }
+            self.device.key(now, key.code, KEY_PRESSED);
+            self.device.key(now, key.code, KEY_RELEASED);
+            for code in modifiers.iter().rev() {
+                self.device.key(now, *code, KEY_RELEASED);
+            }
+            self.queue.flush()
         })?
         .context("flush to niri")?;
-        self.pressed.push(key.code);
         super::super::bounded_roundtrip(
             &self.connection,
             &mut self.queue,
@@ -970,6 +1007,20 @@ mod tests {
         assert_eq!((undo.code, undo.group), (21, 1));
         let enter = plan_key(xkb1().unwrap(), US_DE, 0, &[], "Return").unwrap();
         assert_eq!((enter.code, enter.modifiers), (ENTER, 0));
+    }
+
+    #[test]
+    fn chords_hold_real_modifier_keys_not_only_a_mask() {
+        for (mods, expected) in [
+            ("ctrl", 29),  // KEY_LEFTCTRL
+            ("shift", 42), // KEY_LEFTSHIFT
+            ("alt", 56),   // KEY_LEFTALT
+            ("logo", 125), // KEY_LEFTMETA
+        ] {
+            let key = plan_key(xkb1().unwrap(), US_DE, 0, &[mods.into()], "c").unwrap();
+            assert_eq!(key.modifier_count, 1, "{mods:?}");
+            assert_eq!(key.modifier_codes[0], expected, "{mods:?}");
+        }
     }
 
     #[test]
