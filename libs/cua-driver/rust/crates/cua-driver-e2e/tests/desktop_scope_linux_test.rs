@@ -174,6 +174,30 @@ fn desktop_input_route() -> DriverRoute {
     }
 }
 
+/// AT-SPI component extents are screen-absolute layout coordinates. Desktop
+/// scope takes pixels of the compositor's desktop frame, which is that layout
+/// translated so the bounding box starts at (0, 0). On a multi-output layout
+/// with a raised monitor the origins differ.
+fn desktop_frame_point(x: i64, y: i64) -> (i64, i64) {
+    if !platform_linux::wayland::is_wayland() {
+        return (x, y);
+    }
+    let (x, y) = (x as i32, y as i32);
+    if platform_linux::wayland::niri::is_session() {
+        if let Ok(snapshot) = platform_linux::wayland::niri::desktop_snapshot() {
+            let (x, y) = snapshot.frame.from_layout(x, y);
+            return (i64::from(x), i64::from(y));
+        }
+    }
+    if platform_linux::wayland::hyprland::is_session() {
+        if let Ok(frame) = platform_linux::wayland::hyprland::desktop_frame() {
+            let (x, y) = frame.from_layout(x, y);
+            return (i64::from(x), i64::from(y));
+        }
+    }
+    (i64::from(x), i64::from(y))
+}
+
 /// niri does not report where tiled windows are, so it takes desktop-scope
 /// points only as pixels of the latest `get_desktop_state` screenshot.
 fn desktop_screenshot_on_niri(driver: &mut McpDriver, session: &str) {
@@ -239,8 +263,9 @@ fn desktop_scope_windowless_click_lands_on_control() {
         let Some((cx, cy)) = center else {
             panic!("increment button frame not found in required GTK3 AT-SPI tree");
         };
+        let (cx, cy) = desktop_frame_point(cx, cy);
         let pre = counter(&snap).unwrap_or(0);
-        println!("[desktop-linux] increment button screen-center=({cx},{cy}) pre-counter={pre}");
+        println!("[desktop-linux] increment button desktop-frame=({cx},{cy}) pre-counter={pre}");
         let posture = driver.call(
             "bring_to_front",
             serde_json::json!({"session": window_session, "pid": pid as i64, "window_id": wid}),
@@ -368,11 +393,12 @@ fn desktop_scope_windowless_scroll_lands_on_control() {
             }
             // The root box's 12 px border at the right edge holds no control
             // that takes the wheel, so the outer scroller gets it.
+            let (ox, oy) = desktop_frame_point(bx + bw - 6, by + bh / 2);
             let outer = driver.call(
                 "scroll",
                 serde_json::json!({
                     "session": desktop_session, "scope": "desktop",
-                    "x": bx + bw - 6, "y": by + bh / 2,
+                    "x": ox, "y": oy,
                     "direction": "down", "by": "line", "amount": 5
                 }),
             );
@@ -386,7 +412,7 @@ fn desktop_scope_windowless_scroll_lands_on_control() {
             target = element_center_containing(&snap, "scroll-tall-viewport")
                 .expect("GTK3 scroll target left the AT-SPI tree");
         }
-        let (x, y) = target;
+        let (x, y) = desktop_frame_point(target.0, target.1);
         let before = marker_value(&snap, "scroll_offset=").unwrap_or(0);
         driver.start_behavior_recording();
         let response = driver.call(
@@ -572,6 +598,7 @@ fn desktop_scope_drag_holds_and_releases_modifier() {
         let snap = ax_snapshot(&mut driver, &window_session, pid, wid);
         let (x, y) = element_center_containing(&snap, "btn-clicktarget")
             .expect("GTK3 drag target frame not found");
+        let (x, y) = desktop_frame_point(x, y);
         let before_keys = marker_value(&snap, "key_presses=").unwrap_or(0);
         let before_drags = marker_value(&snap, "drag_events=").unwrap_or(0);
         let before_clicks = marker_value(&snap, "clicks=").unwrap_or(0);
