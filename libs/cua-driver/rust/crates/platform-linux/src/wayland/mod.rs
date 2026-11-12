@@ -946,25 +946,36 @@ fn capture_via_screencopy() -> anyhow::Result<Vec<u8>> {
 /// [`capture_via_screencopy`], plus the wl_output v4 name of the copied
 /// output when the compositor reports one.
 fn screencopy_first_output() -> anyhow::Result<(Vec<u8>, Option<String>)> {
-    screencopy_selected_output(None)
+    let raw = screencopy_selected_rgba(None)?;
+    let png = cua_driver_core::image_utils::encode_rgba_to_png(&raw.rgba, raw.width, raw.height)?;
+    Ok((png, raw.name))
 }
 
-/// Capture one wl_output chosen by its v4 name. Compositors expose wl_output
-/// objects in registry order, which has nothing to do with the output a
-/// caller means, so capture must address the object by the name the
+/// One output's pixels after screencopy, still undecoded and undownscaled.
+pub(crate) struct RawCapture {
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) name: Option<String>,
+}
+
+/// Capture one wl_output chosen by its v4 name, without a PNG encode, for
+/// callers that resize or compose the pixels themselves. Compositors expose
+/// wl_output objects in registry order, which has nothing to do with the
+/// output a caller means, so capture must address the object by the name the
 /// compositor reports.
-fn screencopy_output_named(name: &str) -> anyhow::Result<Vec<u8>> {
-    let (png, captured) = screencopy_selected_output(Some(name))?;
-    if captured.as_deref() != Some(name) {
+fn screencopy_output_rgba_named(name: &str) -> anyhow::Result<RawCapture> {
+    let raw = screencopy_selected_rgba(Some(name))?;
+    if raw.name.as_deref() != Some(name) {
         anyhow::bail!("the compositor did not confirm it copied output {name:?}");
     }
-    Ok(png)
+    Ok(raw)
 }
 
 /// Screencopy one output: the first advertised one when `wanted` is `None`,
 /// otherwise the output whose wl_output v4 name equals `wanted`. Returns the
-/// PNG and the name the compositor reported for the copied output.
-fn screencopy_selected_output(wanted: Option<&str>) -> anyhow::Result<(Vec<u8>, Option<String>)> {
+/// pixels and the name the compositor reported for the copied output.
+fn screencopy_selected_rgba(wanted: Option<&str>) -> anyhow::Result<RawCapture> {
     // The whole copy, connection included, waits at most this long.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     // On niri every round trip is bounded by it as well, so a stalled niri
@@ -1069,7 +1080,7 @@ fn screencopy_selected_output(wanted: Option<&str>) -> anyhow::Result<(Vec<u8>, 
         }
     }
 
-    let result = (|| -> anyhow::Result<Vec<u8>> {
+    let result = (|| -> anyhow::Result<RawCapture> {
         let w = state.capture.width;
         let h = state.capture.height;
         let stride = state.capture.stride as usize;
@@ -1099,7 +1110,12 @@ fn screencopy_selected_output(wanted: Option<&str>) -> anyhow::Result<(Vec<u8>, 
                 rgba.extend_from_slice(&[r, g, b, a]);
             }
         }
-        cua_driver_core::image_utils::encode_rgba_to_png(&rgba, w, h)
+        Ok(RawCapture {
+            rgba,
+            width: w,
+            height: h,
+            name: None,
+        })
     })();
 
     // Always tear down regardless of result.
@@ -1118,7 +1134,9 @@ fn screencopy_selected_output(wanted: Option<&str>) -> anyhow::Result<(Vec<u8>, 
     );
     cleanup_mmap(mmap_ptr, mmap_len, fd);
 
-    result.map(|png| (png, copied_name))
+    let mut raw = result?;
+    raw.name = copied_name;
+    Ok(raw)
 }
 
 /// Allocate an anonymous shared-memory file of `size` bytes and mmap it RW.
@@ -1381,6 +1399,19 @@ fn screenshot_dispatch_for_pid(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec
 /// portal are not tied to the attested compositor or orient differently, so
 /// niri never falls back to them.
 fn niri_capture_output(output: &str) -> anyhow::Result<niri::DisplayCapture> {
+    let (image, transform) = niri_capture_output_rgba(output)?;
+    let size = image.dimensions();
+    Ok(niri::DisplayCapture {
+        png: encode_rgba_png(image)?,
+        output: output.to_owned(),
+        transform,
+        size,
+    })
+}
+
+/// One niri output's oriented pixels and transform, without a PNG round trip,
+/// for callers that compose several outputs.
+fn niri_capture_output_rgba(output: &str) -> anyhow::Result<(image::RgbaImage, u32)> {
     // Read the transforms on both sides of the copy: a change in between
     // would orient the buffer with a transform it was not taken in.
     let before = niri::output_transforms()?;
@@ -1388,20 +1419,13 @@ fn niri_capture_output(output: &str) -> anyhow::Result<niri::DisplayCapture> {
         .get(output)
         .copied()
         .ok_or_else(|| anyhow::anyhow!("niri reports no enabled output {output:?}"))?;
-    let png = screencopy_output_named(output)?;
+    let raw = screencopy_output_rgba_named(output)?;
     if niri::output_transforms()?.get(output) != Some(&transform) {
         anyhow::bail!("the transform of niri output {output:?} changed during capture");
     }
-    let png = orient_png_for_niri_transform(png, transform)?;
-    let size = image::ImageReader::new(std::io::Cursor::new(&png))
-        .with_guessed_format()?
-        .into_dimensions()?;
-    Ok(niri::DisplayCapture {
-        png,
-        output: output.to_owned(),
-        transform,
-        size,
-    })
+    let image = image::RgbaImage::from_raw(raw.width, raw.height, raw.rgba)
+        .ok_or_else(|| anyhow::anyhow!("invalid pixels for niri output {output:?}"))?;
+    Ok((orient_rgba_for_niri_transform(image, transform)?, transform))
 }
 
 /// A niri desktop capture. One output keeps the physical-resolution copy so
@@ -1420,8 +1444,8 @@ fn niri_display_capture_png() -> anyhow::Result<Vec<u8>> {
         return Ok(niri_capture_output(&output.name)?.png);
     }
     let canvas = compose_frame(&frame, |output| {
-        let capture = niri_capture_output(&output.name)?;
-        Ok(image::load_from_memory_with_format(&capture.png, image::ImageFormat::Png)?.to_rgba8())
+        let (image, _) = niri_capture_output_rgba(&output.name)?;
+        Ok(image)
     })?;
     anyhow::ensure!(
         niri::desktop_snapshot()?.frame == frame,
@@ -1431,9 +1455,10 @@ fn niri_display_capture_png() -> anyhow::Result<Vec<u8>> {
 }
 
 /// niri has no per-toplevel capture protocol: crop a settled display capture
-/// to a placed, unoverlapped floating window and scale it to the window's
-/// logical size, the window-local coordinate frame input uses. A tiled
-/// window refuses: niri does not report where it is.
+/// to a placed, unoverlapped window and scale it to the window's logical size,
+/// the window-local coordinate frame input uses. Tiled windows use the tile
+/// position niri reports for the current workspace view; an off-view tile has
+/// none and refuses.
 fn niri_window_capture(xid: u64, pid: Option<u32>) -> anyhow::Result<Vec<u8>> {
     let (png, plan) = niri::capture_window(xid, pid, niri_capture_output)
         .map_err(|reason| surface_identity_unproven(xid, format!("niri: {reason}")))?;
@@ -1656,6 +1681,24 @@ fn orient_display_png(png: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 /// flips. A nested niri forces `Flipped180` (a vertical flip) on its winit
 /// output, so its screencopy buffer is upside down. Flips combined with a
 /// quarter turn are refused rather than guessed.
+fn orient_rgba_for_niri_transform(
+    image: image::RgbaImage,
+    transform: u32,
+) -> anyhow::Result<image::RgbaImage> {
+    let image = image::DynamicImage::ImageRgba8(image);
+    let oriented = match transform {
+        0 => image,
+        1 => image.rotate90(),
+        2 => image.rotate180(),
+        3 => image.rotate270(),
+        4 => image.fliph(),
+        6 => image.flipv(),
+        other => anyhow::bail!("niri output transform {other} is not supported for capture"),
+    };
+    Ok(oriented.into_rgba8())
+}
+
+#[cfg(test)]
 fn orient_png_for_niri_transform(png: Vec<u8>, transform: u32) -> anyhow::Result<Vec<u8>> {
     let flip: fn(&image::DynamicImage) -> image::DynamicImage = match transform {
         0..=3 => return rotate_png_for_output_transform(png, transform),
@@ -4670,7 +4713,8 @@ const _BTN_LEFT_ALIAS: u32 = BTN_LEFT;
 #[cfg(test)]
 mod output_transform_tests {
     use super::{
-        logical_output_size, orient_png_for_niri_transform, rotate_png_for_output_transform,
+        logical_output_size, orient_png_for_niri_transform, orient_rgba_for_niri_transform,
+        rotate_png_for_output_transform,
     };
 
     #[test]
@@ -4721,6 +4765,34 @@ mod output_transform_tests {
             (blue, red)
         );
         assert!(rotate_png_for_output_transform(two_pixel_png(), 5).is_err());
+    }
+
+    #[test]
+    fn niri_rgba_orientation_undoes_flips_and_refuses_combined_transforms() {
+        let mut img = image::RgbaImage::new(2, 2);
+        let red = image::Rgba([255, 0, 0, 255]);
+        let blue = image::Rgba([0, 0, 255, 255]);
+        img.put_pixel(0, 0, red);
+        img.put_pixel(1, 1, blue);
+
+        let flipped = orient_rgba_for_niri_transform(img.clone(), 6).unwrap();
+        assert_eq!(
+            (*flipped.get_pixel(0, 1), *flipped.get_pixel(1, 0)),
+            (red, blue)
+        );
+        let turned = orient_rgba_for_niri_transform(img.clone(), 1).unwrap();
+        assert_eq!(turned.dimensions(), (2, 2));
+        assert_eq!(*turned.get_pixel(1, 0), red);
+        assert_eq!(
+            orient_rgba_for_niri_transform(img, 0).unwrap().dimensions(),
+            (2, 2)
+        );
+        assert_eq!(
+            orient_rgba_for_niri_transform(image::RgbaImage::new(1, 1), 5)
+                .unwrap_err()
+                .to_string(),
+            "niri output transform 5 is not supported for capture"
+        );
     }
 
     #[test]
