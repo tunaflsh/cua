@@ -2847,8 +2847,8 @@ fn popup_list(popups: &[crate::input::PopupWindow]) -> String {
 
 /// Every pixel action reports the point it resolved, success or refusal, so
 /// a coordinate-frame mistake is visible: `window_point` is what the caller
-/// passed (window-local pixels after zoom / resize translation),
-/// `screen_point` is where that lands on the screen.
+/// passed (window-local pixels after zoom / resize translation), and
+/// `desktop_point` is where that lands in the desktop frame.
 pub(crate) fn with_pixel_points(
     mut result: ToolResult,
     screen: Option<(i32, i32)>,
@@ -2861,8 +2861,9 @@ pub(crate) fn with_pixel_points(
     structured["window_point"] = json!([window.0, window.1]);
     let mut note = format!(" [window_point=({}, {})", window.0, window.1);
     if let Some((sx, sy)) = screen {
-        structured["screen_point"] = json!([sx, sy]);
-        note.push_str(&format!(" screen_point=({sx}, {sy})"));
+        let (dx, dy) = crate::wayland::desktop_frame_point(sx, sy).unwrap_or((sx, sy));
+        structured["desktop_point"] = json!([dx, dy]);
+        note.push_str(&format!(" desktop_point=({dx}, {dy})"));
     }
     note.push(']');
     result.structured_content = Some(structured);

@@ -32,9 +32,10 @@ impl Tool for GetDesktopStateTool {
             name: "get_desktop_state".into(),
             description: "Capture the full display in the desktop action coordinate frame. \
                 Use the returned PNG directly as the coordinate source for actions whose target is \
-                {kind:\"desktop\",display_id:\"primary\"}. The frame is normalized: its (0,0) is \
-                compositor layout `frame_origin`; window-scope screen_point values are layout, so \
-                convert with desktop_point = screen_point - frame_origin. No AT-SPI walk.".into(),
+                {kind:\"desktop\",display_id:\"primary\"}. This frame is the single global CUA \
+                space: window bounds and window-scope desktop_point use it too. The frame is \
+                normalized, so its (0,0) may differ from niri IPC layout coordinates. No AT-SPI \
+                walk.".into(),
             input_schema: json!({"type":"object","properties":{
                 "session":{"type":"string","description":"For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session."},
                 "screenshot_out_file":{"type":"string","description":"Write PNG here instead of base64."},
@@ -342,11 +343,10 @@ fn desktop_window_lines(
     }
     out.push_str("\n→ get_window_state(pid, window_id) lists clickable elements; click/type_text take the same pid (+ window_id for x,y).");
     out.push_str(&format!(
-        "\n→ Coordinate anchor: this desktop frame's (0,0) is compositor layout ({}, {}); \
-         screenshot pixels are scaled by {frame_scale:.2}. Window-scope screen_point values are \
-         layout coordinates; convert with \
-         desktop_point = (screen_point - ({}, {})) / {frame_scale:.2}.",
-        frame_origin.0, frame_origin.1, frame_origin.0, frame_origin.1
+        "\n→ All CUA coordinates use this desktop frame; window bounds and window-scope \
+         desktop_point match it. niri IPC uses a different compositor layout — add \
+         ({}, {}) only if you intentionally mix the two.",
+        frame_origin.0, frame_origin.1
     ));
     out.push_str(
         "\n→ Off-screen windows are omitted here; list_windows shows state=not_on_screen and why \
@@ -403,7 +403,7 @@ mod background_budget_tests {
         assert!(text.contains("LibreOffice Calc"));
         assert!(text.contains("app=libreoffice"));
         assert!(text.contains("get_window_state(pid, window_id)"));
-        assert!(text.contains("layout (0, -730)"));
+        assert!(text.contains("add (0, -730)"));
         assert!(text.contains("state=not_on_screen"));
         assert!(desktop_window_lines(&[], 1.0, (0, -730)).contains("none"));
         // A downsized desktop screenshot reports window rects in ITS pixels.

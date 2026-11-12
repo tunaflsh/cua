@@ -42,7 +42,7 @@ impl Tool for RightClickTool {
                 (path mpx_pointer); a point covered by another application's window is refused \
                 (target_occluded), one covered by this app's own dialog is retargeted to it \
                 (retargeted_to), one outside the window is refused (point_outside_window; x/y are \
-                window-local pixels, the result reports window_point / screen_point). No focus \
+                window-local pixels, the result reports window_point / desktop_point). No focus \
                 steal. When a context menu opens, the result names it (`popup: {window_id, bounds, \
                 title}`): call get_window_state(pid, window_id=<that id>) to index its menu items \
                 and click them by element_token. Provide either (window_id + x/y) or (pid + element_token). \

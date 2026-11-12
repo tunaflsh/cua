@@ -825,13 +825,12 @@ impl Tool for ClickTool {
                 Provide either (window_id + x/y) or (pid + element_token). x/y are \
                 WINDOW-LOCAL pixels of window_id (the get_window_state screenshot frame); \
                 a point outside the window is refused (point_outside_window) and every \
-                pixel result reports the resolved window_point / screen_point. Background \
+                pixel result reports the resolved window_point / desktop_point. Background \
                 delivery first resolves the accessible under the point and fires its action \
                 (the result says `hit: <role> \"<name>\" action=...`; a file / list item is \
                 selected through its container: `selected: ...`), else presses the real \
-                virtual pointer there. `screen_point` in the result is compositor layout, not \
-                the normalized desktop frame; for scope:\"desktop\" convert with \
-                desktop_point = (screen_point - get_desktop_state.frame_origin) / frame_scale. A click that opens a popup menu names it (`popup: \
+                virtual pointer there. `desktop_point` is in the same desktop frame as \
+                scope:\"desktop\" and get_desktop_state. A click that opens a popup menu names it (`popup: \
                 {window_id, bounds}`): pass that window_id to get_window_state to index its \
                 items. The token is stale once the next get_window_state of the same \
                 window replaces its snapshot — \

@@ -79,9 +79,9 @@ impl Tool for ListWindowsTool {
                 relying on array order. Filter with `app` or `pid`: an unfiltered call lists \
                 every window on the host. Windows that are hidden, minimized, on an inactive \
                 workspace, or outside the current workspace view are listed with state= and no \
-                usable bounds; bring them on screen before using their geometry. Window x/y are \
-                compositor layout coordinates, while scope:\"desktop\" uses the normalized frame \
-                returned by get_desktop_state.".into(),
+                usable bounds; bring them on screen before using their geometry. Window x/y and \
+                scope:\"desktop\" coordinates use the same desktop frame returned by \
+                get_desktop_state.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -107,7 +107,13 @@ impl Tool for ListWindowsTool {
             crate::proc_fs::is_process_live,
         );
         if crate::wayland::is_wayland() {
+            // The registry stores compositor-layout origins for click
+            // re-anchoring; rebase the returned records afterwards so every
+            // CUA result uses the same desktop frame.
             crate::wayland::remember_observed_window_origins(&windows);
+            if let Ok(Some(frame)) = crate::wayland::current_desktop_frame() {
+                frame.rebase_windows(&mut windows);
+            }
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         let mut any_without_bounds = false;
@@ -123,9 +129,7 @@ impl Tool for ListWindowsTool {
             );
         }
         lines.push(
-            "  (window x/y use compositor layout coordinates; scope:\"desktop\" uses a \
-             normalized frame — see get_desktop_state frame_origin and frame_scale to convert)"
-                .into(),
+            "  (window x/y use the desktop frame; scope:\"desktop\" uses the same frame)".into(),
         );
         // Only in the text: a structured field would change the cross-platform
         // output record and its generated bindings.
