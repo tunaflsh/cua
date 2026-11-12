@@ -32,7 +32,9 @@ impl Tool for GetDesktopStateTool {
             name: "get_desktop_state".into(),
             description: "Capture the full display in the desktop action coordinate frame. \
                 Use the returned PNG directly as the coordinate source for actions whose target is \
-                {kind:\"desktop\",display_id:\"primary\"}. No AT-SPI walk.".into(),
+                {kind:\"desktop\",display_id:\"primary\"}. The frame is normalized: its (0,0) is \
+                compositor layout `frame_origin`; window-scope screen_point values are layout, so \
+                convert with desktop_point = screen_point - frame_origin. No AT-SPI walk.".into(),
             input_schema: json!({"type":"object","properties":{
                 "session":{"type":"string","description":"For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session."},
                 "screenshot_out_file":{"type":"string","description":"Write PNG here instead of base64."},
@@ -190,6 +192,11 @@ impl Tool for GetDesktopStateTool {
                 (shot_w, shot_h),
                 (screen_w, screen_h),
             )?;
+            let frame_origin = niri_frame
+                .as_ref()
+                .or(hyprland_frame.as_ref())
+                .or(kwin_frame.as_ref())
+                .map_or((0, 0), |frame| (frame.x, frame.y));
             Ok((
                 b64,
                 shot_w,
@@ -202,6 +209,7 @@ impl Tool for GetDesktopStateTool {
                 capture_id,
                 overlay_capture,
                 kwin_distorted,
+                frame_origin,
             ))
         })
         .await;
@@ -219,6 +227,7 @@ impl Tool for GetDesktopStateTool {
                 capture_id,
                 overlay_capture,
                 kwin_distorted,
+                frame_origin,
             ))) => {
                 let frame_scale = if shot_w > 0 {
                     f64::from(screen_w) / f64::from(shot_w)
@@ -235,6 +244,7 @@ impl Tool for GetDesktopStateTool {
                     "screen_height": screen_h,
                     "scale_factor": scale_factor,
                     "frame_scale": frame_scale,
+                    "frame_origin": { "x": frame_origin.0, "y": frame_origin.1 },
                     "screenshot_mime_type": "image/png",
                     "windows": windows.iter().map(window_record_json).collect::<Vec<_>>(),
                     "capture_id": capture_id,
@@ -248,7 +258,7 @@ impl Tool for GetDesktopStateTool {
                 if let Some(b64) = b64_opt {
                     content.push(cua_driver_core::protocol::Content::image_png(b64));
                 }
-                let window_lines = desktop_window_lines(&windows, frame_scale);
+                let window_lines = desktop_window_lines(&windows, frame_scale, frame_origin);
                 let mut frame_note = if (frame_scale - 1.0).abs() > 0.001 {
                     format!(
                         "; x/y for scope:\"desktop\" actions are pixels of THIS screenshot \
@@ -296,14 +306,18 @@ impl Tool for GetDesktopStateTool {
 /// Text block naming every visible window with the `pid` / `window_id` pair
 /// that every other tool takes, so the model's first action targets a real
 /// process instead of guessing.
-fn desktop_window_lines(windows: &[crate::x11::WindowInfo], frame_scale: f64) -> String {
+fn desktop_window_lines(
+    windows: &[crate::x11::WindowInfo],
+    frame_scale: f64,
+    frame_origin: (i32, i32),
+) -> String {
     let px = |v: i32| (f64::from(v) / frame_scale).round() as i32;
     let sz = |v: u32| (f64::from(v) / frame_scale).round() as u32;
-    if windows.is_empty() {
-        return "\nVisible windows: none (use list_windows / launch_app).".to_owned();
-    }
-    let mut out =
-        String::from("\nVisible windows (use these pid + window_id values in every tool call):");
+    let mut out = if windows.is_empty() {
+        "\nVisible windows: none (use list_windows / launch_app).".to_owned()
+    } else {
+        String::from("\nVisible windows (use these pid + window_id values in every tool call):")
+    };
     for w in windows {
         let title = if w.title.is_empty() {
             "(no title)".to_owned()
@@ -327,6 +341,17 @@ fn desktop_window_lines(windows: &[crate::x11::WindowInfo], frame_scale: f64) ->
         ));
     }
     out.push_str("\n→ get_window_state(pid, window_id) lists clickable elements; click/type_text take the same pid (+ window_id for x,y).");
+    out.push_str(&format!(
+        "\n→ Coordinate anchor: this desktop frame's (0,0) is compositor layout ({}, {}); \
+         screenshot pixels are scaled by {frame_scale:.2}. Window-scope screen_point values are \
+         layout coordinates; convert with \
+         desktop_point = (screen_point - ({}, {})) / {frame_scale:.2}.",
+        frame_origin.0, frame_origin.1, frame_origin.0, frame_origin.1
+    ));
+    out.push_str(
+        "\n→ Off-screen windows are omitted here; list_windows shows state=not_on_screen and why \
+         their bounds are unavailable.",
+    );
     out
 }
 
@@ -373,14 +398,16 @@ mod background_budget_tests {
             width: 1920,
             height: 1053,
         }];
-        let text = desktop_window_lines(&windows, 1.0);
+        let text = desktop_window_lines(&windows, 1.0, (0, -730));
         assert!(text.contains("pid=4321 window_id=48234499"));
         assert!(text.contains("LibreOffice Calc"));
         assert!(text.contains("app=libreoffice"));
         assert!(text.contains("get_window_state(pid, window_id)"));
-        assert!(desktop_window_lines(&[], 1.0).contains("none"));
+        assert!(text.contains("layout (0, -730)"));
+        assert!(text.contains("state=not_on_screen"));
+        assert!(desktop_window_lines(&[], 1.0, (0, -730)).contains("none"));
         // A downsized desktop screenshot reports window rects in ITS pixels.
-        let scaled = desktop_window_lines(&windows, 1.5);
+        let scaled = desktop_window_lines(&windows, 1.5, (0, -730));
         assert!(scaled.contains("1280x702 at (0,18)"), "{scaled}");
     }
 }

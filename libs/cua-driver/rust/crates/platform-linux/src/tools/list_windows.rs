@@ -8,7 +8,7 @@ use cua_driver_core::{
 };
 use serde_json::{json, Value};
 
-use super::impl_::window_record_json;
+use super::impl_::{window_record_json, window_visibility_note};
 use crate::x11::WindowInfo;
 
 /// Apply the tool's filters, then rank the surviving stacked windows `0..n`
@@ -40,6 +40,28 @@ fn retain_listed(
     }
 }
 
+fn window_list_line(w: &WindowInfo) -> String {
+    let state = window_visibility_note(w)
+        .map(|note| format!(" state={note}"))
+        .unwrap_or_default();
+    format!(
+        "  window_id={} pid={} \"{}\" {}x{}+{}+{}{}{}",
+        w.xid,
+        w.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+        w.title,
+        w.width,
+        w.height,
+        w.x,
+        w.y,
+        if w.app_name.is_empty() {
+            String::new()
+        } else {
+            format!(" app={}", w.app_name)
+        },
+        state
+    )
+}
+
 // ── list_windows ─────────────────────────────────────────────────────────────
 
 pub struct ListWindowsTool;
@@ -55,7 +77,11 @@ impl Tool for ListWindowsTool {
                 and callers must not infer one). To select a frontmost candidate, take the maximum \
                 integer z_index; if every value is null, use an explicit fallback instead of \
                 relying on array order. Filter with `app` or `pid`: an unfiltered call lists \
-                every window on the host.".into(),
+                every window on the host. Windows that are hidden, minimized, on an inactive \
+                workspace, or outside the current workspace view are listed with state= and no \
+                usable bounds; bring them on screen before using their geometry. Window x/y are \
+                compositor layout coordinates, while scope:\"desktop\" uses the normalized frame \
+                returned by get_desktop_state.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -84,23 +110,23 @@ impl Tool for ListWindowsTool {
             crate::wayland::remember_observed_window_origins(&windows);
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
+        let mut any_without_bounds = false;
         for w in &windows {
-            lines.push(format!(
-                "  window_id={} pid={} \"{}\" {}x{}+{}+{}{}",
-                w.xid,
-                w.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-                w.title,
-                w.width,
-                w.height,
-                w.x,
-                w.y,
-                if w.app_name.is_empty() {
-                    String::new()
-                } else {
-                    format!(" app={}", w.app_name)
-                }
-            ));
+            any_without_bounds |= window_visibility_note(w).is_some();
+            lines.push(window_list_line(w));
         }
+        if any_without_bounds {
+            lines.push(
+                "  (0x0 windows with state=not_on_screen are real windows, not zero-sized ones; \
+                 their bounds are available after bringing them on screen)"
+                    .into(),
+            );
+        }
+        lines.push(
+            "  (window x/y use compositor layout coordinates; scope:\"desktop\" uses a \
+             normalized frame — see get_desktop_state frame_origin and frame_scale to convert)"
+                .into(),
+        );
         // Only in the text: a structured field would change the cross-platform
         // output record and its generated bindings.
         if let (true, Some(note)) = (
@@ -169,6 +195,13 @@ mod tests {
                 (6, Some(3))
             ]
         );
+    }
+
+    #[test]
+    fn text_explains_a_window_without_bounds() {
+        let line = window_list_line(&window(7, 10, "niri", false, None));
+        assert!(line.contains("state=not_on_screen"), "{line}");
+        assert!(line.contains("until brought on screen"), "{line}");
     }
 
     #[test]

@@ -829,7 +829,9 @@ impl Tool for ClickTool {
                 delivery first resolves the accessible under the point and fires its action \
                 (the result says `hit: <role> \"<name>\" action=...`; a file / list item is \
                 selected through its container: `selected: ...`), else presses the real \
-                virtual pointer there. A click that opens a popup menu names it (`popup: \
+                virtual pointer there. `screen_point` in the result is compositor layout, not \
+                the normalized desktop frame; for scope:\"desktop\" convert with \
+                desktop_point = (screen_point - get_desktop_state.frame_origin) / frame_scale. A click that opens a popup menu names it (`popup: \
                 {window_id, bounds}`): pass that window_id to get_window_state to index its \
                 items. The token is stale once the next get_window_state of the same \
                 window replaces its snapshot — \

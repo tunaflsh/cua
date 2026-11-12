@@ -486,6 +486,20 @@ pub(crate) fn exec_basename(s: &str) -> String {
 /// existing Linux callers don't break. Fully additive; no field removed,
 /// no schema_version bump.
 ///
+/// Why a window has no usable bounds, for the text formatter the model reads.
+pub(crate) fn window_visibility_note(w: &crate::x11::WindowInfo) -> Option<&'static str> {
+    if !w.is_on_screen {
+        Some(
+            "not_on_screen (hidden, minimized, on an inactive workspace, or outside the current \
+             workspace view); no usable bounds until brought on screen",
+        )
+    } else if w.width == 0 || w.height == 0 {
+        Some("bounds_unavailable (the compositor reports it on screen but published no bounds)")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn window_record_json(w: &crate::x11::WindowInfo) -> Value {
     json!({
         "window_id": w.xid,
@@ -555,6 +569,24 @@ mod list_windows_tests {
     }
 
     #[test]
+    fn off_screen_note_explains_missing_bounds_in_text() {
+        let w = crate::x11::WindowInfo {
+            xid: 44,
+            pid: Some(1234),
+            app_name: "niri-tiled-app".to_owned(),
+            title: "Off view".to_owned(),
+            is_on_screen: false,
+            z_index: None,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        let note = window_visibility_note(&w).expect("off-screen window needs a state note");
+        assert!(note.contains("not_on_screen"));
+        assert!(note.contains("until brought on screen"));
+    }
+
     fn unavailable_wayland_order_serializes_as_null() {
         let w = crate::x11::WindowInfo {
             xid: 43,
