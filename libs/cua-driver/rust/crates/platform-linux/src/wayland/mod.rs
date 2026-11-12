@@ -1549,12 +1549,21 @@ pub(crate) fn compose_frame(
                     output.height
                 );
             }
-            image = image::imageops::resize(
-                &image,
-                output.width,
-                output.height,
-                image::imageops::FilterType::Lanczos3,
-            );
+            // Large downscales use `thumbnail`'s fast integer sampling; a
+            // 4K output otherwise spends seconds in the resize before the
+            // screenshot reaches the agent. Fractional scales keep the
+            // triangle filter, where the ratio is close to 1.
+            let ratio = f64::from(image.width()) / f64::from(output.width);
+            image = if ratio >= 2.0 {
+                image::imageops::thumbnail(&image, output.width, output.height)
+            } else {
+                image::imageops::resize(
+                    &image,
+                    output.width,
+                    output.height,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
         }
         let (left, top) = frame.from_layout(output.x, output.y);
         image::imageops::replace(&mut canvas, &image, i64::from(left), i64::from(top));
