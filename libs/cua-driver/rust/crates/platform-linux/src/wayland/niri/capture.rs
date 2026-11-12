@@ -27,8 +27,8 @@ pub struct CapturePlan {
 
 /// An oriented display capture, the output it copied and the transform the
 /// buffer was oriented with.
-pub struct DisplayCapture {
-    pub png: Vec<u8>,
+pub struct DisplayCapture<T> {
+    pub image: T,
     pub output: String,
     pub transform: u32,
     pub size: (u32, u32),
@@ -91,11 +91,11 @@ pub(super) fn capture_plan_in(
 /// window and its output must read the same before and after the capture; a
 /// move away and back between the two reads is not seen. Errors are refusal
 /// reasons for `surface_identity_unproven`.
-pub fn capture_window(
+pub fn capture_window<T>(
     id: u64,
     pid: Option<u32>,
-    capture_display: impl FnOnce(&str) -> Result<DisplayCapture>,
-) -> Result<(Vec<u8>, CapturePlan), String> {
+    capture_display: impl FnOnce(&str) -> Result<DisplayCapture<T>>,
+) -> Result<(T, CapturePlan), String> {
     let mut ipc = ipc();
     capture_window_in(
         |deadline| ipc.scene_until(deadline),
@@ -105,12 +105,12 @@ pub fn capture_window(
     )
 }
 
-fn capture_window_in(
+fn capture_window_in<T>(
     mut scene: impl FnMut(Instant) -> Result<Scene>,
     id: u64,
     pid: Option<u32>,
-    capture_display: impl FnOnce(&str) -> Result<DisplayCapture>,
-) -> Result<(Vec<u8>, CapturePlan), String> {
+    capture_display: impl FnOnce(&str) -> Result<DisplayCapture<T>>,
+) -> Result<(T, CapturePlan), String> {
     let mut plan_now = |deadline| -> Result<CapturePlan, String> {
         Ok(capture_plan_in(
             &scene(deadline).map_err(|e| format!("{e:#}"))?,
@@ -144,7 +144,7 @@ fn capture_window_in(
             capture.size.0, capture.size.1, plan.image.0, plan.image.1, plan.output
         ));
     }
-    Ok((capture.png, plan))
+    Ok((capture.image, plan))
 }
 
 #[cfg(test)]

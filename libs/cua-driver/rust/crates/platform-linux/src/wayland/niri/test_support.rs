@@ -256,13 +256,17 @@ pub(super) fn ipc_with(
     }
 }
 
-pub(super) fn display(output: &str, size: (u32, u32)) -> Result<DisplayCapture> {
+pub(super) fn display(output: &str, size: (u32, u32)) -> Result<DisplayCapture<()>> {
     oriented(output, 6, size)
 }
 
-pub(super) fn oriented(output: &str, transform: u32, size: (u32, u32)) -> Result<DisplayCapture> {
+pub(super) fn oriented(
+    output: &str,
+    transform: u32,
+    size: (u32, u32),
+) -> Result<DisplayCapture<()>> {
     Ok(DisplayCapture {
-        png: vec![1],
+        image: (),
         output: output.into(),
         transform,
         size,
