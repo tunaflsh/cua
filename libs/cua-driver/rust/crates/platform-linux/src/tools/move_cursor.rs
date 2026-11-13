@@ -153,6 +153,9 @@ impl MoveCursorTool {
                 .ok()
                 .and_then(Result::ok)
         };
+        // The reported point follows niri's desktop frame; the overlay and
+        // pointer reveal below still use the compositor layout point.
+        let report_screen = frame_screen_point(screen);
         let cursor_id = resolve_cursor_key(args);
         crate::overlay::send_command_for(
             cursor_id.clone(),
@@ -166,7 +169,7 @@ impl MoveCursorTool {
         );
         let delivery = crate::input::delivery::DeliveryMode::from_args(args);
         if !isolated_hyprland_background(delivery) {
-            return window_hover_result(&moved, xid, screen, HoverOutcome::Unavailable);
+            return window_hover_result(&moved, xid, report_screen, HoverOutcome::Unavailable);
         }
         let owner = named_session_cursor_key(args);
         let action = crate::wayland::hyprland_input::Action::Hover { x, y };
@@ -176,7 +179,12 @@ impl MoveCursorTool {
             Ok(dispatch) => dispatch,
             Err(refusal) => {
                 let reason = refusal_reason(refusal.structured_content.as_ref());
-                return window_hover_result(&moved, xid, screen, HoverOutcome::Refused(reason));
+                return window_hover_result(
+                    &moved,
+                    xid,
+                    report_screen,
+                    HoverOutcome::Refused(reason),
+                );
             }
         };
         let outcome = match dispatch.await {
@@ -190,7 +198,7 @@ impl MoveCursorTool {
             Ok(Err(error)) => HoverOutcome::Unknown(error.to_string()),
             Err(error) => HoverOutcome::Unknown(error.to_string()),
         };
-        window_hover_result(&moved, xid, screen, outcome)
+        window_hover_result(&moved, xid, report_screen, outcome)
     }
 }
 
@@ -213,6 +221,19 @@ fn refusal_reason(structured: Option<&Value>) -> String {
         .and_then(Value::as_str)
         .unwrap_or("background_unavailable")
         .to_owned()
+}
+
+/// Convert the reported point into niri's desktop frame. Other backends keep
+/// the upstream layout coordinate.
+fn frame_screen_point(screen: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    screen.map(|(x, y)| {
+        if !crate::wayland::niri::is_session() {
+            return (x, y);
+        }
+        let (x, y) = (x.round() as i32, y.round() as i32);
+        let (x, y) = crate::wayland::desktop_frame_point(x, y).unwrap_or((x, y));
+        (f64::from(x), f64::from(y))
+    })
 }
 
 /// What to tell the agent after a window-target move. An app that saw no

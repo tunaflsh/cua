@@ -458,10 +458,10 @@ that names the remedy.
 - Several outputs are supported: window capture reads the wl_output the window
   is on, and `get_desktop_state` composes every output into the logical
   desktop frame. Window-coordinate input uses layout coordinates, which span
-  all outputs; on niri, window-scope click results report `screen_point`
-  relative to the desktop frame, while `list_windows` reports layout
-  coordinates. A rotated output among several is composed after its transform
-  is applied.
+  all outputs; on niri, window-scope click and move_cursor results report
+  `screen_point` relative to the desktop frame, while `list_windows` reports
+  layout coordinates. A rotated output among several is composed after its
+  transform is applied.
 - A floating window that moves between the coordinate translation and the
   input refuses the input; take a new screenshot and retry.
 
