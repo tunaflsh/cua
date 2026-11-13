@@ -8,7 +8,7 @@ use cua_driver_core::{
 };
 use serde_json::{json, Value};
 
-use super::impl_::{window_record_json, window_visibility_note};
+use super::impl_::window_record_json;
 use crate::x11::WindowInfo;
 
 /// Apply the tool's filters, then rank the surviving stacked windows `0..n`
@@ -41,24 +41,22 @@ fn retain_listed(
 }
 
 fn window_list_line(w: &WindowInfo) -> String {
-    let state = window_visibility_note(w)
-        .map(|note| format!(" state={note}"))
-        .unwrap_or_default();
+    let bounds = if w.is_on_screen && w.width > 0 && w.height > 0 {
+        format!("{}x{}+{}+{}", w.width, w.height, w.x, w.y)
+    } else {
+        "hidden".to_owned()
+    };
     format!(
-        "  window_id={} pid={} \"{}\" {}x{}+{}+{}{}{}",
+        "  window_id={} pid={} \"{}\" {}{}",
         w.xid,
         w.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
         w.title,
-        w.width,
-        w.height,
-        w.x,
-        w.y,
+        bounds,
         if w.app_name.is_empty() {
             String::new()
         } else {
             format!(" app={}", w.app_name)
-        },
-        state
+        }
     )
 }
 
@@ -72,16 +70,10 @@ impl Tool for ListWindowsTool {
     fn def(&self) -> &ToolDef {
         LIST_WINDOWS_DEF.get_or_init(|| ToolDef {
             name: "list_windows".into(),
-            description: "List top-level windows. Each record includes z_index (integer or null; \
-                higher values are closer to the front; null means stacking order is unavailable \
-                and callers must not infer one). To select a frontmost candidate, take the maximum \
-                integer z_index; if every value is null, use an explicit fallback instead of \
-                relying on array order. Filter with `app` or `pid`: an unfiltered call lists \
-                every window on the host. Windows that are hidden, minimized, on an inactive \
-                workspace, or outside the current workspace view are listed with state= and no \
-                usable bounds; bring them on screen before using their geometry. Window x/y and \
-                scope:\"desktop\" coordinates use the same desktop frame returned by \
-                get_desktop_state.".into(),
+            description: "List top-level windows. Filter with `app` or `pid`; an unfiltered call \
+                lists every window on the host. Hidden windows are shown as `hidden` with no \
+                bounds; focus them before acting. z_index in the structured record is stacking \
+                order: higher is front, null means unavailable.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -116,21 +108,9 @@ impl Tool for ListWindowsTool {
             }
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
-        let mut any_without_bounds = false;
         for w in &windows {
-            any_without_bounds |= window_visibility_note(w).is_some();
             lines.push(window_list_line(w));
         }
-        if any_without_bounds {
-            lines.push(
-                "  (0x0 windows with state=not_on_screen are real windows, not zero-sized ones; \
-                 their bounds are available after bringing them on screen)"
-                    .into(),
-            );
-        }
-        lines.push(
-            "  (window x/y use the desktop frame; scope:\"desktop\" uses the same frame)".into(),
-        );
         // Only in the text: a structured field would change the cross-platform
         // output record and its generated bindings.
         if let (true, Some(note)) = (
@@ -202,10 +182,29 @@ mod tests {
     }
 
     #[test]
-    fn text_explains_a_window_without_bounds() {
+    fn visible_window_line_matches_the_upstream_shape() {
+        let w = WindowInfo {
+            xid: 7,
+            pid: Some(10),
+            app_name: "niri".into(),
+            title: "Window".into(),
+            is_on_screen: true,
+            z_index: None,
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        assert_eq!(
+            window_list_line(&w),
+            "  window_id=7 pid=10 \"Window\" 300x200+10+20 app=niri"
+        );
+    }
+
+    fn hidden_window_line_uses_a_hidden_bounds_token() {
         let line = window_list_line(&window(7, 10, "niri", false, None));
-        assert!(line.contains("state=not_on_screen"), "{line}");
-        assert!(line.contains("until brought on screen"), "{line}");
+        assert!(line.contains(" hidden"), "{line}");
+        assert!(!line.contains("0x0"), "{line}");
     }
 
     #[test]
