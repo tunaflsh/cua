@@ -68,8 +68,9 @@ impl Tool for GetCursorPositionTool {
             // desktop frame that get_desktop_state and desktop actions use, so
             // convert through the compositor's frame. With several outputs
             // that frame's origin can be above or left of (0, 0).
-            let layout = tokio::task::spawn_blocking(|| {
-                if crate::wayland::niri::is_session() {
+            let on_niri = crate::wayland::niri::is_session();
+            let layout = tokio::task::spawn_blocking(move || {
+                if on_niri {
                     crate::wayland::niri::desktop_snapshot().map(|snapshot| Some(snapshot.frame))
                 } else {
                     crate::wayland::kwin_desktop_layout()
@@ -80,9 +81,10 @@ impl Tool for GetCursorPositionTool {
             let frame = match layout {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(e)) => {
+                    let compositor = if on_niri { "niri" } else { "KWin" };
                     return ToolResult::error(format!(
-                        "Could not read the compositor layout: {e:#}"
-                    ))
+                        "Could not read the {compositor} layout: {e:#}"
+                    ));
                 }
                 Err(e) => return ToolResult::error(format!("Task error: {e}")),
             };
