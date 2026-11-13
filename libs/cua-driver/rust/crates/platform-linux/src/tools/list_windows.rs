@@ -99,13 +99,7 @@ impl Tool for ListWindowsTool {
             crate::proc_fs::is_process_live,
         );
         if crate::wayland::is_wayland() {
-            // The registry stores compositor-layout origins for click
-            // re-anchoring; rebase the returned records afterwards so every
-            // CUA result uses the same desktop frame.
             crate::wayland::remember_observed_window_origins(&windows);
-            if let Ok(Some(frame)) = crate::wayland::current_desktop_frame() {
-                frame.rebase_windows(&mut windows);
-            }
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {

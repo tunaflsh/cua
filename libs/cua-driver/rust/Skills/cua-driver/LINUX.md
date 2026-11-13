@@ -450,16 +450,16 @@ that names the remedy.
   as on Sway: giving focus back would close the menu they opened. Text and keys
   use niri's own keymap, and focus is checked before every key.
 - `list_windows` gives an in-view tiled window its tile/window bounds; an
-  off-view tiled window has no bounds, does not read `is_on_screen`, and says
-  `state=not_on_screen` in the text output.
+  off-view tiled window has no bounds and does not read `is_on_screen`, and
+  its text line says `hidden`.
   A tiled window hidden behind an output-sized fullscreen tile also does not
   read `is_on_screen`, because niri IPC has no fullscreen flag; do not treat
   that alone as "closed".
 - Several outputs are supported: window capture reads the wl_output the window
   is on, and `get_desktop_state` composes every output into the logical
-  desktop frame. `list_windows` bounds and window-scope click results use that
-  same desktop frame; window-coordinate input itself stays window-local. A
-  rotated output among several is composed after its transform is applied.
+  desktop frame. Window-coordinate input uses layout coordinates, which span
+  all outputs. A rotated output among several is composed after its transform
+  is applied.
 - A floating window that moves between the coordinate translation and the
   input refuses the input; take a new screenshot and retry.
 
