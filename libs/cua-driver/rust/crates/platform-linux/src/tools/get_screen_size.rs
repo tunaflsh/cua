@@ -80,13 +80,14 @@ impl Tool for GetScreenSizeTool {
                 // on or off, so re-read it after any display change.
                 let describe = |m: &Value| {
                     let name = m["name"].as_str().unwrap_or("?");
+                    let scale = m["scale"].as_f64().unwrap_or(1.0);
                     match (
                         m["powered"].as_bool(),
                         m["frame_x"].as_i64(),
                         m["frame_y"].as_i64(),
                     ) {
                         (Some(true), Some(x), Some(y)) => format!(
-                            "{name} {}x{} on, at ({x},{y}) in the desktop frame",
+                            "{name} {}x{} @ {scale}x on, at ({x},{y}) in the desktop frame",
                             m["width"], m["height"]
                         ),
                         _ => format!("{name} off (standby), not in the desktop frame"),
@@ -99,7 +100,7 @@ impl Tool for GetScreenSizeTool {
                     .map(describe)
                     .collect();
                 ToolResult::text(format!(
-                    "✅ Desktop frame: {w}x{h} points @ {scale}x, spanning every monitor that is on.\n{}",
+                    "✅ Desktop frame: {w}x{h} points, spanning every monitor that is on.\n{}",
                     lines.join("\n")
                 ))
                 .with_structured(json!({
