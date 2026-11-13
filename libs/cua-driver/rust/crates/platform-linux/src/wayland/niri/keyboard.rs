@@ -714,14 +714,15 @@ impl Strokes for Keyboard {
         self.pressed.push(key.code);
         crate::input::action::admit(|| {
             let now = super::super::event_time_ms();
-            // Older niri honors the absolute mask; current niri drops it
-            // around the keymap swap but forwards real modifier key events.
-            // Send both so the chord survives either behavior.
-            self.device
-                .modifiers(key.modifiers, 0, 0, key.group);
+            // Older niri honors the absolute mask; current niri forwards the
+            // real modifier key events. Press the modifiers first, then apply
+            // the mask before the chord key: applying the mask before the key
+            // presses cancels their state on niri 26.04.
             for code in modifiers {
                 self.device.key(now, *code, KEY_PRESSED);
             }
+            self.device
+                .modifiers(key.modifiers, 0, 0, key.group);
             self.device.key(now, key.code, KEY_PRESSED);
             self.device.key(now, key.code, KEY_RELEASED);
             for code in modifiers.iter().rev() {
