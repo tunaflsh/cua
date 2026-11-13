@@ -825,7 +825,8 @@ impl Tool for ClickTool {
                 Provide either (window_id + x/y) or (pid + element_token). x/y are \
                 WINDOW-LOCAL pixels of window_id (the get_window_state screenshot frame); \
                 a point outside the window is refused (point_outside_window) and every \
-                pixel result reports the resolved window_point / screen_point. Background \
+                pixel result reports the resolved window_point / screen_point; on niri, \
+                screen_point is relative to the desktop frame. Background \
                 delivery first resolves the accessible under the point and fires its action \
                 (the result says `hit: <role> \"<name>\" action=...`; a file / list item is \
                 selected through its container: `selected: ...`), else presses the real \

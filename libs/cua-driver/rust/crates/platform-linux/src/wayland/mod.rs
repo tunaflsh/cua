@@ -2632,6 +2632,26 @@ pub fn scroll(window_id: u64, direction: &str, amount: u32) -> anyhow::Result<()
 /// `(x, y)` through would aim window-local coordinates at the layout origin.
 /// On niri the point carries the rectangle used, so the pointer gate refuses
 /// if the window moved before the input is sent.
+/// The compositor's current desktop frame, if it exposes one.
+fn current_desktop_frame() -> anyhow::Result<Option<hyprland::DesktopFrame>> {
+    if !is_wayland() {
+        return Ok(None);
+    }
+    if niri::is_session() {
+        return Ok(Some(niri::desktop_snapshot()?.frame));
+    }
+    if hyprland::is_session() {
+        return Ok(Some(hyprland::desktop_frame()?));
+    }
+    Ok(kwin_desktop_layout()?.map(|layout| layout.frame))
+}
+
+/// Convert a compositor-layout point into the desktop frame. On X11 and
+/// compositors without a frame this is the identity.
+pub fn desktop_frame_point(x: i32, y: i32) -> anyhow::Result<(i32, i32)> {
+    Ok(current_desktop_frame()?.map_or((x, y), |frame| frame.from_layout(x, y)))
+}
+
 pub fn window_local_to_output(window_id: u64, x: i32, y: i32) -> anyhow::Result<AimedPoint> {
     if niri::is_session() {
         return niri::aim(window_id, x, y);
