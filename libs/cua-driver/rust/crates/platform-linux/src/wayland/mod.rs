@@ -2652,6 +2652,18 @@ pub fn desktop_frame_point(x: i32, y: i32) -> anyhow::Result<(i32, i32)> {
     Ok(current_desktop_frame()?.map_or((x, y), |frame| frame.from_layout(x, y)))
 }
 
+/// Move window geometry from compositor-layout coordinates into the desktop
+/// frame, matching `get_desktop_state`. On X11 and compositors without a frame
+/// this is the identity.
+pub fn rebase_windows_to_desktop_frame(
+    windows: &mut [crate::x11::WindowInfo],
+) -> anyhow::Result<()> {
+    if let Some(frame) = current_desktop_frame()? {
+        frame.rebase_windows(windows);
+    }
+    Ok(())
+}
+
 pub fn window_local_to_output(window_id: u64, x: i32, y: i32) -> anyhow::Result<AimedPoint> {
     if niri::is_session() {
         return niri::aim(window_id, x, y);

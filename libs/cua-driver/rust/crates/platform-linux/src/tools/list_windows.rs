@@ -71,9 +71,10 @@ impl Tool for ListWindowsTool {
         LIST_WINDOWS_DEF.get_or_init(|| ToolDef {
             name: "list_windows".into(),
             description: "List top-level windows. Filter with `app` or `pid`; an unfiltered call \
-                lists every window on the host. Hidden windows are shown as `hidden` with no \
-                bounds; focus them before acting. z_index in the structured record is stacking \
-                order: higher is front, null means unavailable.".into(),
+                lists every window on the host. Window bounds use the desktop frame shown by \
+                get_desktop_state. Hidden windows are shown as `hidden` with no usable bounds; \
+                focus them before acting. z_index in the structured record is stacking order: \
+                higher is front, null means unavailable.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -99,7 +100,16 @@ impl Tool for ListWindowsTool {
             crate::proc_fs::is_process_live,
         );
         if crate::wayland::is_wayland() {
+            // Keep the cache in compositor-layout coordinates for input
+            // fallbacks; only the returned geometry is rebased.
             crate::wayland::remember_observed_window_origins(&windows);
+            if let Err(error) =
+                crate::wayland::rebase_windows_to_desktop_frame(&mut windows)
+            {
+                return ToolResult::error(format!(
+                    "Could not read the desktop frame: {error:#}"
+                ));
+            }
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {
