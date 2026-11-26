@@ -2940,10 +2940,45 @@ fn popup_list(popups: &[crate::input::PopupWindow]) -> String {
         .join(", ")
 }
 
+/// Resolve a window-local pixel into:
+/// - the compositor-layout `AimedPoint` (Wayland only),
+/// - the layout / X11 screen point for the cursor overlay glide, and
+/// - the desktop-frame `screen_point` reported back to the caller.
+///
+/// Runs all compositor/X11 queries inside `spawn_blocking` so the async
+/// executor never blocks on IPC or D-Bus.
+pub(crate) async fn resolve_window_pixel_targets(
+    xid: u64,
+    x: f64,
+    y: f64,
+) -> Result<(Option<AimedPoint>, Option<(f64, f64)>, Option<(i32, i32)>), ToolResult> {
+    if crate::wayland::is_wayland() {
+        let (lx, ly) = (x.round() as i32, y.round() as i32);
+        return match tokio::task::spawn_blocking(move || {
+            crate::wayland::window_local_to_output_with_frame(xid, lx, ly)
+        })
+        .await
+        {
+            Ok(Ok((aimed, frame_point))) => {
+                let glide = Some((aimed.point.0 as f64, aimed.point.1 as f64));
+                Ok((Some(aimed), glide, Some(frame_point)))
+            }
+            Ok(Err(error)) => Err(input_error_result(error)),
+            Err(error) => Err(ToolResult::error(format!("Task error: {error}"))),
+        };
+    }
+    let glide = tokio::task::spawn_blocking(move || window_local_to_screen(xid, x, y))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let report = glide.map(|(sx, sy)| (sx.round() as i32, sy.round() as i32));
+    Ok((None, glide, report))
+}
+
 /// Every pixel action reports the point it resolved, success or refusal, so
 /// a coordinate-frame mistake is visible: `window_point` is what the caller
-/// passed (window-local pixels after zoom / resize translation),
-/// `screen_point` is where that lands on the screen.
+/// passed (window-local pixels after zoom / resize translation), and
+/// `screen_point` is where that lands in the desktop frame.
 pub(crate) fn with_pixel_points(
     mut result: ToolResult,
     screen: Option<(i32, i32)>,

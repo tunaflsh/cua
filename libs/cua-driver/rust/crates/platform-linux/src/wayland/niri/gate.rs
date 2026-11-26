@@ -52,6 +52,28 @@ pub fn aim(window_id: u64, x: i32, y: i32) -> Result<AimedPoint> {
     aim_at(&window, x, y)
 }
 
+/// Like [`aim`], plus the same point translated into niri's desktop frame from
+/// the same IPC snapshot so callers do not make a second round trip.
+pub fn aim_with_frame_point(window_id: u64, x: i32, y: i32) -> Result<(AimedPoint, (i32, i32))> {
+    let scene = ipc().scene().map_err(input_unavailable)?;
+    aim_with_frame_in(&scene, window_id, x, y)
+}
+
+fn aim_with_frame_in(
+    scene: &Scene,
+    window_id: u64,
+    x: i32,
+    y: i32,
+) -> Result<(AimedPoint, (i32, i32))> {
+    single_output_pointer(scene)?;
+    let window = scene.window(window_id).map_err(input_unavailable)?;
+    let aimed = aim_at(&window, x, y)?;
+    let frame_point = super::desktop_snapshot_in(scene).map_or(aimed.point, |snapshot| {
+        snapshot.frame.from_layout(aimed.point.0, aimed.point.1)
+    });
+    Ok((aimed, frame_point))
+}
+
 /// Window-addressed pointer input needs a single output: with several, the
 /// virtual pointer's absolute motion spans their bounding box, and nothing
 /// has shown that niri maps it the way the driver computes it.
@@ -380,6 +402,19 @@ mod tests {
         );
         let one = one_output(vec![floating(7, 1, (100.0, 60.0), (300, 200))]);
         assert!(single_output_pointer(&one).is_ok());
+    }
+
+    #[test]
+    fn aim_with_frame_translates_offset_output_point_into_desktop_frame() {
+        let scene = scene(
+            vec![floating(7, 1, (100.0, 60.0), (300, 200))],
+            vec![workspace(1, "DP-2", true, None)],
+            vec![output("DP-2", 1920, -730, (2560, 1440), 1.0, "Normal")],
+            false,
+        );
+        let (aimed, frame_point) = aim_with_frame_in(&scene, 7, 10, 20).unwrap();
+        assert_eq!(aimed.point, (2030, -650));
+        assert_eq!(frame_point, (110, 80));
     }
 
     #[test]

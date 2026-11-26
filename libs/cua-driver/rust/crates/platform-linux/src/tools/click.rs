@@ -23,11 +23,12 @@ use super::impl_::{
     isolated_hyprland_task_error, named_session_cursor_key, non_ax_escalation, parse_mouse_button,
     prepare_desktop_click_cursor, prove_token_element, push_evidence, refuse_if_disabled,
     require_point_args, resolve_cursor_key, resolve_element_local_coords,
-    reveal_pointer_action_for, reveal_pointer_action_target_for, screenshot_scale,
-    spawn_blocking_bounded, spawn_isolated_hyprland, synthetic_pointer_is_dropped,
-    unavailable_chromium_background, unavailable_wayland_focused_input_background,
-    window_local_to_screen, window_scope_unproven_refusal, with_pixel_points,
-    x11_pixel_click_no_focus_steal, AimedPoint, CoordinateContext, PointerRoute, ToolState,
+    resolve_window_pixel_targets, reveal_pointer_action_for, reveal_pointer_action_target_for,
+    screenshot_scale, spawn_blocking_bounded, spawn_isolated_hyprland,
+    synthetic_pointer_is_dropped, unavailable_chromium_background,
+    unavailable_wayland_focused_input_background, window_local_to_screen,
+    window_scope_unproven_refusal, with_pixel_points, x11_pixel_click_no_focus_steal,
+    CoordinateContext, PointerRoute, ToolState,
 };
 
 #[cfg(test)]
@@ -950,7 +951,8 @@ impl Tool for ClickTool {
                 Provide either (window_id + x/y) or (pid + element_token). x/y are \
                 WINDOW-LOCAL pixels of window_id (the get_window_state screenshot frame); \
                 a point outside the window is refused (point_outside_window) and every \
-                pixel result reports the resolved window_point / screen_point. Background \
+                pixel result reports the resolved window_point / screen_point (in the \
+                desktop frame shown by get_desktop_state). Background \
                 delivery first resolves the accessible under the point and fires its action \
                 (the result says `hit: <role> \"<name>\" action=...`; a file / list item is \
                 selected through its container: `selected: ...`), else presses the real \
@@ -1724,35 +1726,20 @@ impl Tool for ClickTool {
             cursor_id.clone(),
             cursor_overlay::OverlayCommand::PinAbove(xid),
         );
-        // Resolve the screen point the cursor glides to. Tool coordinates are
+        // Resolve the screen point the cursor glides to and the desktop-frame
+        // `screen_point` reported back to the caller. Tool coordinates are
         // always window-local screenshot pixels; native Wayland translates
         // through compositor/AT-SPI geometry while X11 uses XTranslateCoordinates.
-        let wayland_output_point = if crate::wayland::is_wayland() {
-            match crate::wayland::window_local_to_output(xid, x.round() as i32, y.round() as i32) {
-                Ok(point) => Some(point),
-                Err(error) => return input_error_result(error),
-            }
-        } else {
-            None
-        };
-        let glide_target = if let Some(AimedPoint {
-            point: (sx, sy), ..
-        }) = wayland_output_point
-        {
-            Some((sx as f64, sy as f64))
-        } else {
-            tokio::task::spawn_blocking(move || window_local_to_screen(xid, x, y))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-        };
+        let (wayland_output_point, glide_target, pixel_screen_point) =
+            match resolve_window_pixel_targets(xid, x, y).await {
+                Ok(targets) => targets,
+                Err(refusal) => return refusal,
+            };
         if let Some((sx, sy)) = glide_target {
             reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
         }
 
         let (xi, yi) = (x as i32, y as i32);
-        let pixel_screen_point =
-            glide_target.map(|(sx, sy)| (sx.round() as i32, sy.round() as i32));
         let aimed = wayland_output_point.unwrap_or_else(|| (xi, yi).into());
         let (output_x, output_y) = aimed.point;
         if hyprland_foreground(delivery) {

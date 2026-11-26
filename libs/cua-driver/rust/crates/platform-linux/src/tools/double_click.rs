@@ -16,12 +16,12 @@ use super::{
         checked_element_local_coords, coordinate_frame_schema, desktop_frame_requested,
         desktop_frame_unmapped, desktop_to_window_local, element_screen_center_and_rect,
         foreground_budget, hyprland_foreground, input_error_result, prove_token_element,
-        refuse_if_disabled, require_point_args, resolve_cursor_key, reveal_pointer_action_for,
-        reveal_pointer_action_target_for, screenshot_scale, spawn_blocking_bounded,
-        unavailable_chromium_background, unavailable_synthetic_pointer_background,
-        unavailable_wayland_focused_input_background, unavailable_webkit_background,
-        window_local_to_screen, with_pixel_points, x11_pixel_click_no_focus_steal, AimedPoint,
-        PointerRoute, ToolState,
+        refuse_if_disabled, require_point_args, resolve_cursor_key, resolve_window_pixel_targets,
+        reveal_pointer_action_for, reveal_pointer_action_target_for, screenshot_scale,
+        spawn_blocking_bounded, unavailable_chromium_background,
+        unavailable_synthetic_pointer_background, unavailable_wayland_focused_input_background,
+        unavailable_webkit_background, window_local_to_screen, with_pixel_points,
+        x11_pixel_click_no_focus_steal, PointerRoute, ToolState,
     },
 };
 
@@ -257,25 +257,11 @@ impl Tool for DoubleClickTool {
             cursor_id.clone(),
             cursor_overlay::OverlayCommand::PinAbove(xid),
         );
-        let wayland_output_point = if crate::wayland::is_wayland() {
-            match crate::wayland::window_local_to_output(xid, x.round() as i32, y.round() as i32) {
-                Ok(point) => Some(point),
-                Err(error) => return input_error_result(error),
-            }
-        } else {
-            None
-        };
-        let glide_target = if let Some(AimedPoint {
-            point: (sx, sy), ..
-        }) = wayland_output_point
-        {
-            Some((sx as f64, sy as f64))
-        } else {
-            tokio::task::spawn_blocking(move || window_local_to_screen(xid, x, y))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-        };
+        let (wayland_output_point, glide_target, pixel_screen_point) =
+            match resolve_window_pixel_targets(xid, x, y).await {
+                Ok(targets) => targets,
+                Err(refusal) => return refusal,
+            };
         if let Some((sx, sy)) = glide_target {
             reveal_pointer_action_for(&self.state, &cursor_id, sx, sy, true).await;
         }
@@ -345,10 +331,6 @@ impl Tool for DoubleClickTool {
             Ok(Err(e)) => input_error_result(e),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         };
-        with_pixel_points(
-            outcome,
-            glide_target.map(|(sx, sy)| (sx.round() as i32, sy.round() as i32)),
-            (xi, yi),
-        )
+        with_pixel_points(outcome, pixel_screen_point, (xi, yi))
     }
 }

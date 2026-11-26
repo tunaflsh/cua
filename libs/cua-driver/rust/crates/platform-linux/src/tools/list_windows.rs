@@ -55,7 +55,8 @@ impl Tool for ListWindowsTool {
                 and callers must not infer one). To select a frontmost candidate, take the maximum \
                 integer z_index; if every value is null, use an explicit fallback instead of \
                 relying on array order. Filter with `app` or `pid`: an unfiltered call lists \
-                every window on the host.".into(),
+                every window on the host. Window bounds use the desktop frame shown by \
+                get_desktop_state.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -81,7 +82,23 @@ impl Tool for ListWindowsTool {
             crate::proc_fs::is_process_live,
         );
         if crate::wayland::is_wayland() {
-            crate::wayland::remember_observed_window_origins(&windows);
+            windows = match tokio::task::spawn_blocking(move || {
+                // Keep the cache in compositor-layout coordinates for input
+                // fallbacks; only the returned geometry is rebased.
+                crate::wayland::remember_observed_window_origins(&windows);
+                crate::wayland::rebase_windows_to_desktop_frame(&mut windows)?;
+                Ok::<_, anyhow::Error>(windows)
+            })
+            .await
+            {
+                Ok(Ok(windows)) => windows,
+                Ok(Err(error)) => {
+                    return ToolResult::error(format!(
+                        "Could not read the desktop frame: {error:#}"
+                    ));
+                }
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            };
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {

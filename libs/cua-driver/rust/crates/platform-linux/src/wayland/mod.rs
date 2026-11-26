@@ -2475,6 +2475,55 @@ pub fn scroll(window_id: u64, direction: &str, amount: u32) -> anyhow::Result<()
     scroll_at(window_id, None, direction, amount)
 }
 
+/// The compositor's current desktop frame, if it exposes one.
+fn current_desktop_frame() -> anyhow::Result<Option<hyprland::DesktopFrame>> {
+    if !is_wayland() {
+        return Ok(None);
+    }
+    if niri::is_session() {
+        return Ok(Some(niri::desktop_snapshot()?.frame));
+    }
+    if hyprland::is_session() {
+        return Ok(Some(hyprland::desktop_frame()?));
+    }
+    Ok(logical_desktop_layout()?.map(|layout| layout.frame))
+}
+
+/// Convert a compositor-layout point into the desktop frame. On X11 and
+/// compositors without a frame this is the identity.
+pub fn desktop_frame_point(x: i32, y: i32) -> anyhow::Result<(i32, i32)> {
+    Ok(current_desktop_frame()?.map_or((x, y), |frame| frame.from_layout(x, y)))
+}
+
+/// Like [`window_local_to_output`], plus the same point translated into the
+/// compositor's desktop frame (`get_desktop_state` space). On niri both points
+/// come from a single IPC scene snapshot.
+pub fn window_local_to_output_with_frame(
+    window_id: u64,
+    x: i32,
+    y: i32,
+) -> anyhow::Result<(AimedPoint, (i32, i32))> {
+    if niri::is_session() {
+        return niri::aim_with_frame_point(window_id, x, y);
+    }
+    let aimed = window_local_to_output(window_id, x, y)?;
+    let (sx, sy) = aimed.point;
+    let frame_point = desktop_frame_point(sx, sy).unwrap_or((sx, sy));
+    Ok((aimed, frame_point))
+}
+
+/// Move window geometry from compositor-layout coordinates into the desktop
+/// frame, matching `get_desktop_state`. On X11 and compositors without a frame
+/// this is the identity.
+pub fn rebase_windows_to_desktop_frame(
+    windows: &mut [crate::x11::WindowInfo],
+) -> anyhow::Result<()> {
+    if let Some(frame) = current_desktop_frame()? {
+        frame.rebase_windows(windows);
+    }
+    Ok(())
+}
+
 /// Translate window-local screenshot coordinates into compositor output
 /// coordinates when the active compositor exposes the target geometry.
 /// On niri a window without a reported place (a tiled one) refuses: passing
