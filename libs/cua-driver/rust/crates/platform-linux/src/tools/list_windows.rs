@@ -40,6 +40,26 @@ fn retain_listed(
     }
 }
 
+fn window_list_line(w: &WindowInfo) -> String {
+    let bounds = if !w.is_on_screen {
+        "hidden".to_owned()
+    } else {
+        format!("{}x{}+{}+{}", w.width, w.height, w.x, w.y)
+    };
+    format!(
+        "  window_id={} pid={} \"{}\" {}{}",
+        w.xid,
+        w.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+        w.title,
+        bounds,
+        if w.app_name.is_empty() {
+            String::new()
+        } else {
+            format!(" app={}", w.app_name)
+        }
+    )
+}
+
 // ── list_windows ─────────────────────────────────────────────────────────────
 
 pub struct ListWindowsTool;
@@ -56,7 +76,8 @@ impl Tool for ListWindowsTool {
                 integer z_index; if every value is null, use an explicit fallback instead of \
                 relying on array order. Filter with `app` or `pid`: an unfiltered call lists \
                 every window on the host. Window bounds use the desktop frame shown by \
-                get_desktop_state.".into(),
+                get_desktop_state. Hidden windows are shown as `hidden` with no usable bounds; \
+                focus them before acting.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pid":{"type":"integer","description":"Only list windows owned by this process ID."},
                 "app":{"type":"string","description":cua_driver_core::tool_args::LIST_WINDOWS_APP_FILTER_DESCRIPTION},
@@ -102,21 +123,7 @@ impl Tool for ListWindowsTool {
         }
         let mut lines = vec![format!("Found {} windows:", windows.len())];
         for w in &windows {
-            lines.push(format!(
-                "  window_id={} pid={} \"{}\" {}x{}+{}+{}{}",
-                w.xid,
-                w.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-                w.title,
-                w.width,
-                w.height,
-                w.x,
-                w.y,
-                if w.app_name.is_empty() {
-                    String::new()
-                } else {
-                    format!(" app={}", w.app_name)
-                }
-            ));
+            lines.push(window_list_line(w));
         }
         // Only in the text: a structured field would change the cross-platform
         // output record and its generated bindings.
@@ -185,6 +192,38 @@ mod tests {
                 (5, None),
                 (6, Some(3))
             ]
+        );
+    }
+
+    #[test]
+    fn visible_window_line_matches_the_upstream_shape() {
+        let w = WindowInfo {
+            xid: 7,
+            pid: Some(10),
+            app_name: "niri".into(),
+            title: "Window".into(),
+            is_on_screen: true,
+            z_index: None,
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        assert_eq!(
+            window_list_line(&w),
+            "  window_id=7 pid=10 \"Window\" 300x200+10+20 app=niri"
+        );
+    }
+
+    #[test]
+    fn hidden_window_line_uses_a_hidden_bounds_token() {
+        let line = window_list_line(&window(7, 10, "niri", false, None));
+        assert!(line.contains(" hidden"), "{line}");
+        assert!(!line.contains("0x0"), "{line}");
+        let on_screen_without_bounds = window_list_line(&window(8, 10, "wlroots", true, None));
+        assert!(
+            !on_screen_without_bounds.contains(" hidden"),
+            "{on_screen_without_bounds}"
         );
     }
 

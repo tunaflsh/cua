@@ -505,7 +505,8 @@ that names the remedy.
   as on Sway: giving focus back would close the menu they opened. Text and keys
   use niri's own keymap, and focus is checked before every key.
 - `list_windows` gives an in-view tiled window its tile/window bounds; an
-  off-view tiled window has no bounds and does not read `is_on_screen`.
+  off-view tiled window has no bounds and does not read `is_on_screen`, and
+  its text line says `hidden`.
   A tiled window hidden behind an output-sized fullscreen tile also does not
   read `is_on_screen`, because niri IPC has no fullscreen flag; do not treat
   that alone as "closed".
