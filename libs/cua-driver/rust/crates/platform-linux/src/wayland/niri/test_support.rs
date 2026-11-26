@@ -17,6 +17,14 @@ pub(super) fn floating(id: u64, workspace: u64, at: (f64, f64), size: (i32, i32)
         "focus_timestamp": {"secs": 804, "nanos": 995946831}})
 }
 
+/// A tiled window niri places in the current workspace view. `at` is its
+/// `tile_pos_in_workspace_view`; `tile` is both the tile and window size.
+pub(super) fn tiled_at(id: u64, workspace: u64, at: (f64, f64), tile: (f64, f64)) -> Value {
+    let mut window = tiled(id, workspace, tile);
+    window["layout"]["tile_pos_in_workspace_view"] = json!([at.0, at.1]);
+    window
+}
+
 pub(super) fn tiled(id: u64, workspace: u64, tile: (f64, f64)) -> Value {
     json!({"id": id, "title": "Tiled", "app_id": "tiled.b", "pid": 100 + id,
         "workspace_id": workspace, "is_focused": false, "is_floating": false, "is_urgent": false,
@@ -248,13 +256,17 @@ pub(super) fn ipc_with(
     }
 }
 
-pub(super) fn display(output: &str, size: (u32, u32)) -> Result<DisplayCapture> {
+pub(super) fn display(output: &str, size: (u32, u32)) -> Result<DisplayCapture<()>> {
     oriented(output, 6, size)
 }
 
-pub(super) fn oriented(output: &str, transform: u32, size: (u32, u32)) -> Result<DisplayCapture> {
+pub(super) fn oriented(
+    output: &str,
+    transform: u32,
+    size: (u32, u32),
+) -> Result<DisplayCapture<()>> {
     Ok(DisplayCapture {
-        png: vec![1],
+        image: (),
         output: output.into(),
         transform,
         size,
